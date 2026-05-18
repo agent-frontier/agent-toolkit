@@ -1643,9 +1643,9 @@ split_paths_glob() {
     eval "item=\"$item\""
     case "$item" in
       *[\*\?\[]*)
-        # shellcheck disable=SC2086
         local _saved_nullglob; _saved_nullglob=$(shopt -p nullglob)
         shopt -s nullglob
+        # shellcheck disable=SC2206  # intentional glob expansion
         local _expanded=($item)
         eval "$_saved_nullglob"
         for match in "${_expanded[@]}"; do
