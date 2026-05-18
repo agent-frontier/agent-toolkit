@@ -10,9 +10,13 @@ These scripts create temporary demo workspaces under `demos/.workspaces/`, run t
 - **How to run locally:** `./demos/01-cleanup-flow.sh`
 - **Asciinema:**
 
-```text
-embed link here once recorded
+Local cast: [`01-cleanup-flow.cast`](01-cleanup-flow.cast). Replay with:
+
+```bash
+asciinema play demos/01-cleanup-flow.cast
 ```
+
+Upload + share URL: `asciinema upload demos/01-cleanup-flow.cast`
 
 ## 02-health-recovery.sh
 
@@ -22,9 +26,13 @@ embed link here once recorded
 - **How to run locally:** `./demos/02-health-recovery.sh`
 - **Asciinema:**
 
-```text
-embed link here once recorded
+Local cast: [`02-health-recovery.cast`](02-health-recovery.cast). Replay with:
+
+```bash
+asciinema play demos/02-health-recovery.cast
 ```
+
+Upload + share URL: `asciinema upload demos/02-health-recovery.cast`
 
 ## 03-agent-discovery.sh
 
@@ -34,9 +42,13 @@ embed link here once recorded
 - **How to run locally:** `./demos/03-agent-discovery.sh`
 - **Asciinema:**
 
-```text
-embed link here once recorded
+Local cast: [`03-agent-discovery.cast`](03-agent-discovery.cast). Replay with:
+
+```bash
+asciinema play demos/03-agent-discovery.cast
 ```
+
+Upload + share URL: `asciinema upload demos/03-agent-discovery.cast`
 
 ## Run all demos
 
