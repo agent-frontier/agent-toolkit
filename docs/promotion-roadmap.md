@@ -42,7 +42,7 @@
 |------|--------|-------|
 | MCP server (`mcp-server/`) | shipped | 9 tools via stdio, Anthropic SDK. Single biggest agent-findability lever. |
 | Cookbook / recipes doc | shipped | `docs/cookbook.md` — 6 recipes (Prometheus exporter, Ansible fleet playbook, Slack integrity notifier, jq forensics, manifest reader, Claude Desktop MCP integration). |
-| `cert-watch.sh` (TLS expiry monitor) | candidate | See toolkit-roadmap.md selection criteria. |
+| `cert-watch.sh` (TLS expiry monitor) | shipped | Third shipped toolkit tool: read-only TLS expiry monitor with schemas, smoke coverage, and installer integration. |
 | `log-shipper.sh` (audit-trail exporter) | candidate | Prometheus-friendly. |
 
 ## Phase 4: Compounding (the long game)

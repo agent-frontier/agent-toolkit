@@ -12,6 +12,24 @@ tables below summarize for humans. Both must move together.
 
 ```json
 {
+  "cert-watch": [
+    "cert-hosts",
+    "cert-paths",
+    "cert-status-enum",
+    "doctor",
+    "doctor-json",
+    "health",
+    "health-acknowledge",
+    "health-json",
+    "only",
+    "report",
+    "report-json",
+    "schemas",
+    "sections",
+    "toolkit-manifest",
+    "version",
+    "version-json"
+  ],
   "system-janitor": [
     "aged-logs",
     "doctor",
@@ -60,21 +78,33 @@ corresponding implementation and smoke probe in the same commit.
 
 ## Shared capabilities (identical semantics across tools)
 
-These nine capability strings appear in both tools' arrays and mean
-the same thing in both. Agents probing `--version --json` can rely on
-identical contracts; any divergence is a bug.
+These eleven capability strings appear in multiple tools' arrays and mean
+the same thing everywhere they appear. Agents probing `--version --json`
+can rely on identical contracts; any divergence is a bug.
 
 | Capability | Semantics |
 |---|---|
-| `health` | `--health` flag produces a human-readable health summary; exit `0` healthy, exit `5` degraded/unhealthy. |
+| `doctor` | `--doctor` prints a human-readable readiness/diagnostic summary without mutating state. |
+| `doctor-json` | `--doctor --json` emits a stable JSON object describing diagnostic checks for the tool. |
+| `health` | `--health` prints a human-readable health summary over the tool's persisted audit/state files. |
 | `health-acknowledge` | `--health-acknowledge` writes a byte-offset baseline into `.health-baseline` so prior JSONL lines are excluded from `jsonl_parses` and similar checks. Atomic tmp+rename. |
-| `health-json` | `--health --json` emits a stable shape: `{generated_at, status, log_dir, checks[]}` where each check is `{name, status, detail}`. |
-| `only` | `--only <list>` filters the run scope (sections for janitor, packages for updater); non-matching items are omitted from JSONL and the report. |
+| `health-json` | `--health --json` emits a stable JSON object with top-level health metadata plus a `checks[]` array. |
+| `only` | `--only <list>` filters the run scope (sections for cert-watch and janitor, packages for updater); non-matching items are omitted from JSONL and the report. |
 | `report` | `--report` reads the JSONL audit trail and prints a human-readable summary of prior runs. |
 | `report-json` | `--report --json` emits a machine-readable summary validated by the tool's `schemas/<tool>-report.schema.json`. |
 | `toolkit-manifest` | `--version --json` includes a top-level `toolkit` object with the toolkit name, canonical repo URL, and sibling tool names so agents can discover the rest of the family. |
 | `version` | `--version` prints `<tool-name> <semver>` on stdout; exit `0`. |
 | `version-json` | `--version --json` emits `{name, version, capabilities[], toolkit}` where `capabilities[]` is the array this file describes. |
+
+## `cert-watch`-only capabilities
+
+| Capability | Semantics |
+|---|---|
+| `cert-hosts` | The tool can probe remote TLS endpoints declared as colon-encoded `host:port` pairs in `CERT_WATCH_HOSTS`. |
+| `cert-paths` | The tool can inventory local certificate files from literal paths or glob patterns in `CERT_WATCH_PATHS`. |
+| `cert-status-enum` | Per-cert status values (`ok`, `warn`, `expiring`, `expired`) are distinct from the run aggregate status (`ok`, `warn`, `error`). |
+| `schemas` | Formal Draft 2020-12 JSON Schemas exist for `--report --json` and `--health --json` under `schemas/`. |
+| `sections` | `--sections <list>` is accepted as a synonym for `--only <list>`. |
 
 ## `system-janitor`-only capabilities
 
@@ -133,5 +163,5 @@ capabilities" table above.
   shape these capabilities describe.
 - [`toolkit-roadmap.md`](./toolkit-roadmap.md) — candidate sibling tools
   that will extend this registry.
-- [`../../tests/capabilities-check.sh`](../../tests/capabilities-check.sh)
+- [`https://github.com/agent-frontier/agent-toolkit/blob/main/tests/capabilities-check.sh`](https://github.com/agent-frontier/agent-toolkit/blob/main/tests/capabilities-check.sh)
   — the smoke that enforces registry-script-smoke consistency.

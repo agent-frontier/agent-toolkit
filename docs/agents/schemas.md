@@ -1,7 +1,7 @@
 # JSON Schemas
 
 Formal Draft 2020-12 JSON Schemas for machine-mode outputs live in
-[`../../schemas/`](../../schemas/). Agents should validate parsed
+[`https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/`](https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/). Agents should validate parsed
 output against them. Schemas are forward-compatible
 (`additionalProperties: true`); new fields land without breaking old
 validations.
@@ -10,8 +10,8 @@ validations.
 
 | File | Target output | Draft | `additionalProperties` |
 |---|---|---|---|
-| [`schemas/report.schema.json`](../../schemas/report.schema.json) | `system-janitor --report --json` | 2020-12 | `true` (top level + nested) |
-| [`schemas/health.schema.json`](../../schemas/health.schema.json) | `system-janitor --health --json` | 2020-12 | `true` (top level + nested) |
+| [`schemas/report.schema.json`](https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/report.schema.json) | `system-janitor --report --json` | 2020-12 | `true` (top level + nested) |
+| [`schemas/health.schema.json`](https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/health.schema.json) | `system-janitor --health --json` | 2020-12 | `true` (top level + nested) |
 
 `--version --json` and `--health-acknowledge --json` do not yet have
 formal schemas. Their shapes are fixed in

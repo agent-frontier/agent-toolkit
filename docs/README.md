@@ -55,3 +55,11 @@ on-disk shape is documented in
 - [../examples/config.example](../examples/config.example) — commented sample janitor config
 - [../examples/updater.config.example](../examples/updater.config.example) — commented sample updater config
 - [../LICENSE](../LICENSE) — Apache 2.0
+
+## Docs site local development
+
+```bash
+pip install mkdocs-material pymdown-extensions
+mkdocs serve  # local server at http://127.0.0.1:8000
+mkdocs build  # builds to site/
+```

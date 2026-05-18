@@ -15,7 +15,7 @@ Configuration is loaded in this order (later sources override earlier ones):
 
 The config file is **sourced as bash**, so shell expansions (`$HOME`,
 `$(cmd)`) and comments work. See
-[examples/config.example](../examples/config.example) for a fully-commented
+[examples/config.example](https://github.com/agent-frontier/agent-toolkit/blob/main/examples/config.example) for a fully-commented
 sample.
 
 ## Defaults — run automatically when the toolchain is present

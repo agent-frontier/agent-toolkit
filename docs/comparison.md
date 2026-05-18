@@ -343,7 +343,7 @@ smaller than that.
 
 ## Further reading
 
-- [AGENTS.md](../AGENTS.md) — the full agent contract.
+- [AGENTS.md](AGENTS.md) — the full agent contract.
 - [docs/agents/](./agents/README.md) — machine-mode specs.
 - [docs/cookbook.md](./cookbook.md) — recipes for fleet ops. This file will exist after this round.
 - [docs/promotion-roadmap.md](./promotion-roadmap.md) — what's shipped and what's next. This file will exist after this round.

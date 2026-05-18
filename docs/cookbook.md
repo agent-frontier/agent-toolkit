@@ -2,15 +2,15 @@
 
 Copy-pasteable fleet-ops recipes for `agent-toolkit`. These are aimed at
 operators and sibling agents that need to consume the toolkit's machine-mode
-outputs safely. Read [AGENTS.md](../AGENTS.md) first for the design brief, then
+outputs safely. Read [AGENTS.md](AGENTS.md) first for the design brief, then
 cross-check field names in [docs/agents/machine-modes.md](./agents/machine-modes.md),
 [docs/agents/contracts.md](./agents/contracts.md),
 [docs/audit-trail.md](./audit-trail.md), and the formal schemas in
-[`../schemas/`](../schemas/).
+[`https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/`](https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/).
 
 The examples below assume the default janitor state dir
 `~/.local/state/janitor` and the default installer layout from
-[`install.sh`](../install.sh) / [`scripts/bootstrap.sh`](../scripts/bootstrap.sh).
+[`install.sh`](https://github.com/agent-frontier/agent-toolkit/blob/main/install.sh) / [`scripts/bootstrap.sh`](https://github.com/agent-frontier/agent-toolkit/blob/main/scripts/bootstrap.sh).
 Where a recipe parses JSON, prefer the documented contracts over ad-hoc grep.
 
 ---
@@ -334,7 +334,7 @@ jq -s 'group_by(.run_id) | map(select(any(.[]; .status == "warn")) | {run_id: .[
 jq -s 'group_by(.section) | map({section: .[0].section, counts: (group_by(.status) | map({key: .[0].status, value: length}) | from_entries)})' janitor.jsonl
 ```
 
-These complement `system-janitor --report --json`; use the full report when you want the canonical rollup shape from [`schemas/report.schema.json`](../schemas/report.schema.json).
+These complement `system-janitor --report --json`; use the full report when you want the canonical rollup shape from [`schemas/report.schema.json`](https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/report.schema.json).
 
 **Gotchas**
 
@@ -392,7 +392,7 @@ Current `install.sh` writes this shape:
 }
 ```
 
-Field guide: `name` and `version` identify the toolkit release, `install_root` and `generated_at` tell you where/when the install was written, `tools[]` carries per-tool `name`/`binary`/`source`, `docs.*` points back to [AGENTS.md](../AGENTS.md) and [docs/agents/](./agents/README.md), and `repo_url` records the canonical upstream.
+Field guide: `name` and `version` identify the toolkit release, `install_root` and `generated_at` tell you where/when the install was written, `tools[]` carries per-tool `name`/`binary`/`source`, `docs.*` points back to [AGENTS.md](AGENTS.md) and [docs/agents/](./agents/README.md), and `repo_url` records the canonical upstream.
 
 If you need richer per-tool metadata after resolving the binary, chain this with machine-mode discovery:
 
@@ -409,7 +409,7 @@ Those payloads advertise `capabilities[]` and the top-level `toolkit` object; se
 - The current installer writes `source`, not `config`, `state_dir`, or per-tool `version`. If you need config/state inspection, use `system-janitor --doctor` or the documented default locations.
 - `version` is top-level in the current shape. Do not assume every `tools[]` entry also carries its own version.
 - On a host installed by an older or hand-edited setup, the manifest may be missing or stale; fall back to `$PATH` / `--version --json` discovery if needed.
-- The MCP server also consults the manifest during binary resolution; see [mcp-server/README.md#binary-resolution](../mcp-server/README.md#binary-resolution).
+- The MCP server also consults the manifest during binary resolution; see [mcp-server/README.md#binary-resolution](https://github.com/agent-frontier/agent-toolkit/blob/main/mcp-server/README.md#binary-resolution).
 
 ---
 
@@ -470,7 +470,7 @@ Default-safe rule to preserve:
 
 - `janitor_run` is safe by default because `dry_run=true` unless explicitly set false.
 - `updater_run` is safe by default because `apply=false` unless explicitly set true.
-- The tool descriptions in [mcp-server/README.md](../mcp-server/README.md) warn that `janitor_run --dry-run=false` and `updater_run --apply=true` are destructive.
+- The tool descriptions in [mcp-server/README.md](https://github.com/agent-frontier/agent-toolkit/blob/main/mcp-server/README.md) warn that `janitor_run --dry-run=false` and `updater_run --apply=true` are destructive.
 
 Equivalent MCP docs for other clients:
 
@@ -478,12 +478,12 @@ Equivalent MCP docs for other clients:
 - **Continue**: drop the server definition into Continue's MCP config and keep it in agent mode. Official docs: <https://docs.continue.dev/customize/deep-dives/mcp>.
 - **Cline**: add the stdio server under Cline's MCP server configuration. Official docs: <https://docs.cline.bot/mcp/mcp-overview>.
 
-Relevant repo docs: [mcp-server/README.md](../mcp-server/README.md), [docs/agents/machine-modes.md](./agents/machine-modes.md), [`schemas/report.schema.json`](../schemas/report.schema.json), and [`schemas/health.schema.json`](../schemas/health.schema.json).
+Relevant repo docs: [mcp-server/README.md](https://github.com/agent-frontier/agent-toolkit/blob/main/mcp-server/README.md), [docs/agents/machine-modes.md](./agents/machine-modes.md), [`schemas/report.schema.json`](https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/report.schema.json), and [`schemas/health.schema.json`](https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/health.schema.json).
 
 **Gotchas**
 
 - If `agent-toolkit-mcp` is not on Claude's PATH, replace `"command"` with the full executable path from your user bin dir.
 - Claude Desktop needs a full restart after config changes.
-- Binary resolution prefers env overrides, then `~/.local/bin`, then `$AGENT_TOOLKIT_HOME`, then `~/.config/agent-toolkit/manifest.json`, then `PATH`; see [mcp-server/README.md#binary-resolution](../mcp-server/README.md#binary-resolution).
+- Binary resolution prefers env overrides, then `~/.local/bin`, then `$AGENT_TOOLKIT_HOME`, then `~/.config/agent-toolkit/manifest.json`, then `PATH`; see [mcp-server/README.md#binary-resolution](https://github.com/agent-frontier/agent-toolkit/blob/main/mcp-server/README.md#binary-resolution).
 - Keep destructive flags explicit in chat. “Run janitor” is ambiguous; “run `janitor_run` with `dry_run=true`” is not.
 - Test the integration with a read-only tool first (`janitor_report`, `janitor_health`, `janitor_version`) before allowing any mutating tool call.

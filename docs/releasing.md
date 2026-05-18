@@ -2,7 +2,7 @@
 This runbook covers how to cut a tagged GitHub release for `agent-toolkit`.
 The release path is intentionally simple: update both script versions, promote
 `CHANGELOG.md`, push an annotated `vX.Y.Z` tag, and let
-[`.github/workflows/release.yml`](../.github/workflows/release.yml) build the
+[`.github/workflows/release.yml`](https://github.com/agent-frontier/agent-toolkit/blob/main/.github/workflows/release.yml) build the
 artifacts and publish the GitHub Release.
 
 The workflow is tag-driven (`push.tags: ["v*"]`) and has two jobs:

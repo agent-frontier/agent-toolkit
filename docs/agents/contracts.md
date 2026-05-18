@@ -29,8 +29,8 @@ Agents branch on these to decide retry / escalate / proceed.
 Codes are enforced by the per-tool script (`EXIT_CODE` in
 `system-janitor.sh` / `system-updater.sh`) and by the per-tool health
 schemas (the `exit_code` enum is `[0, 4, 5]` in
-[`schemas/health.schema.json`](../../schemas/health.schema.json) and
-[`schemas/updater-health.schema.json`](../../schemas/updater-health.schema.json)).
+[`schemas/health.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/health.schema.json) and
+[`schemas/updater-health.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/updater-health.schema.json)).
 
 ## Status enum
 
@@ -97,7 +97,7 @@ Rules:
    (claimed but no probe) fail the suite. The reverse direction
    (feature added without capability) is enforced by code review.
 5. **Cross-tool registry consistency** is enforced by
-   [`tests/capabilities-check.sh`](../../tests/capabilities-check.sh).
+   [`tests/capabilities-check.sh`](https://github.com/agent-frontier/agent-toolkit/blob/main/tests/capabilities-check.sh).
    It fails if (a) any tool's runtime `capabilities[]` differs from
    its registry array, or (b) a capability string appears in two
    tools' arrays without a corresponding row in the "Shared

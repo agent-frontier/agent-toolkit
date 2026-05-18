@@ -9,6 +9,7 @@
 last-run.json
 janitor-state/
 state/
+site/
 mcp-server/build/
 mcp-server/dist/
 mcp-server/.pytest_cache/

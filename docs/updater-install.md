@@ -59,7 +59,7 @@ The recommended pattern is **dry-run nightly, manual `--apply` on
 demand**. The dry-run produces a fresh audit-trail event you can inspect
 before deciding to apply. `--apply` requires root and should not run
 unattended in v0 (no real auto-reboot, no real snapshot detection — see
-the roadmap in [CHANGELOG.md](../CHANGELOG.md)).
+the roadmap in [CHANGELOG.md](CHANGELOG.md)).
 
 ```cron
 # system-updater — daily apt update sweep (managed by agent-toolkit install.sh)

@@ -54,6 +54,7 @@ echo "── capabilities registry check ─────────────
 
 # Map registry tool names to script paths.
 declare -A SCRIPTS=(
+  ["cert-watch"]="$REPO_ROOT/cert-watch.sh"
   ["system-janitor"]="$REPO_ROOT/system-janitor.sh"
   ["system-updater"]="$REPO_ROOT/system-updater.sh"
 )

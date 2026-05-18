@@ -92,7 +92,7 @@ toolkit = d.get("toolkit")
 assert isinstance(toolkit, dict), f"toolkit not an object: {toolkit!r}"
 assert toolkit.get("name") == "agent-toolkit", toolkit
 assert toolkit.get("repo") == "https://github.com/agent-frontier/agent-toolkit", toolkit
-assert toolkit.get("tools") == ["system-janitor", "system-updater"], toolkit
+assert toolkit.get("tools") == ["cert-watch", "system-janitor", "system-updater"], toolkit
 PY
 pass "--version --json exposes the exact 16-item capability set plus toolkit manifest"
 
@@ -658,7 +658,7 @@ repo = toolkit.get("repo")
 assert isinstance(repo, str) and repo.startswith("https://github.com/"), repo
 tools = toolkit.get("tools")
 assert isinstance(tools, list) and tools, tools
-assert tools == ["system-janitor", "system-updater"], tools
+assert tools == ["cert-watch", "system-janitor", "system-updater"], tools
 assert "system-updater" in tools, tools
 PY
       ;;

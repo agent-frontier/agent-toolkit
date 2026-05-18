@@ -1,22 +1,25 @@
 # Toolkit roadmap
 
 > **Two roadmaps live in this repo.** This file (`toolkit-roadmap.md`) is the
-> menu of candidate **tools** (cert-watch, log-shipper, etc.). The
-> promotion / visibility / adoption track lives in
+> catalog of sibling **tool ideas** plus a historical note for ideas that
+> graduated into shipped tools (currently `cert-watch.sh`). The promotion /
+> visibility / adoption track lives in
 > [`../promotion-roadmap.md`](../promotion-roadmap.md). They don't overlap.
 
 > What this doc is: a candidates catalog for the next agent-first tools
-> that fit the system-janitor ethos. Sibling thinking to
+> that fit the system-janitor ethos, plus context on why `cert-watch.sh`
+> was the first sibling promoted from this list. Sibling thinking to
 > [`contracts.md`](./contracts.md) and
 > [`machine-modes.md`](./machine-modes.md).
 >
-> What this doc is **not**: a build plan, a schedule, or a promise. No
-> entry here is committed work. CHANGELOG owns commitments; this file
-> owns the menu.
+> What this doc is **not**: a build plan, a schedule, or a promise. Only
+> entries explicitly marked shipped are committed work. CHANGELOG owns
+> commitments; this file owns the menu.
 
-The repo currently ships two Linux-only Bash tools — `system-janitor.sh`
-(disk/cache cleanup) and `system-updater.sh` (apt). They share an agent
-contract: capability discovery, JSONL audit trail, atomic state writes,
+The repo currently ships three Linux-only Bash tools — `cert-watch.sh`
+(TLS expiry monitor), `system-janitor.sh` (disk/cache cleanup), and
+`system-updater.sh` (apt). They share an agent contract: capability
+discovery, JSONL audit trail, atomic state writes,
 `flock` single-instance, `--dry-run` default for destructive paths,
 machine-mode `--report`/`--health`/`--health-acknowledge`, schemas under
 `schemas/`, and smoke tests with capability-completeness probes.
@@ -88,9 +91,9 @@ prior art, and the questions that would actually bite during design.
 
 ---
 
-### cert-watch
+### cert-watch (shipped)
 
-TLS/PKI expiry scanner. Walks a configured set of hosts/ports and/or
+TLS/PKI expiry scanner. Shipped as `cert-watch.sh`; walks a configured set of hosts/ports and/or
 filesystem paths (`/etc/ssl`, `/etc/letsencrypt/live`, Kubernetes
 secrets dirs), parses x509, reports days-to-expiry per cert.
 
@@ -329,12 +332,13 @@ Inventory `/etc/cron.*`, `/etc/cron.d`, user crontabs,
 
 ---
 
-## Lean-wedge proposal
+## Lean-wedge result
 
-Build **`cert-watch.sh` in Bash** first. Linux-only, mirroring
-`system-janitor.sh` / `system-updater.sh` conventions.
+`cert-watch.sh` was the first sibling promoted from this catalog. It
+shipped in Bash, Linux-only, mirroring `system-janitor.sh` /
+`system-updater.sh` conventions.
 
-Why this candidate, in this order:
+Why this candidate won first:
 
 1. **High value.** Cert expiry is the lowest-hanging operational
    fruit for an unsupervised agent. Every hour of work here pays
@@ -355,27 +359,11 @@ Why this candidate, in this order:
    self-signed certs into a tmpdir with arbitrary `-days`. No host
    state, no network, no clock games.
 
-v0 surface sketch (illustrative, not frozen):
+The shipped v0 stayed intentionally small: report/health/doctor/version
+machine modes, append-only JSONL, local-path and remote `host:port`
+inventory, and no mutating `--apply` path.
 
-```
-cert-watch.sh --report --json
-cert-watch.sh --health --json
-cert-watch.sh --version --json    # capabilities[] sorted, frozen
-cert-watch.sh --scan --json       # one-shot scan, emits JSONL events
-                                  # CERTWATCH_PATHS env, colon-separated
-                                  # CERTWATCH_WARN_DAYS (default 30)
-                                  # CERTWATCH_CRITICAL_DAYS (default 7)
-```
-
-No `--apply`. No renewal. No CT-log lookups. No host:port probing
-(yet — that's a v1 conversation once we know the JSONL shape works
-for filesystem certs).
-
-Exit codes extend the shared set with two cert-specific codes
-(candidate values, frozen once shipped):
-
-- `8` — at least one cert in the warn window (default 30 days)
-- `9` — at least one cert expired or unparseable
+No renewal, no CT-log lookups, and no STARTTLS variants yet.
 
 ## What stays out of v1
 

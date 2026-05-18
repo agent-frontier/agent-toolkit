@@ -17,7 +17,7 @@ by design — historical issues are cleared via
 
 For the formal Draft 2020-12 JSON Schemas of `--report --json` and
 `--health --json`, see [agents/schemas.md](./agents/schemas.md) and
-[../schemas/](../schemas/). For the exit-code and capability contract,
+[https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/](https://github.com/agent-frontier/agent-toolkit/tree/main/schemas/). For the exit-code and capability contract,
 see [agents/contracts.md](./agents/contracts.md).
 
 ## JSONL event shape

@@ -20,7 +20,7 @@ Audit-trail rollup over `$UPDATER_LOG_DIR/updater.jsonl`.
 
 - Invocation: `system-updater --report` (text) or `system-updater --report --json`.
 - Exit codes: `0` always (missing/empty JSONL still emits a valid object with zero counts; invalid lines surface via `data_quality` without flipping exit).
-- Schema: [`schemas/updater-report.schema.json`](../../schemas/updater-report.schema.json).
+- Schema: [`schemas/updater-report.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/updater-report.schema.json).
 - Composes with `--only` / `--exclude` (filters `per_package`).
 
 ```json
@@ -70,7 +70,7 @@ not acquire the lock or create the log dir.
 
 - Invocation: `system-updater --health` or `... --health --json`.
 - Exit codes: `0` healthy, `4` degraded, `5` unknown (log dir missing OR `updater-last-run.json` absent).
-- Schema: [`schemas/updater-health.schema.json`](../../schemas/updater-health.schema.json).
+- Schema: [`schemas/updater-health.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/updater-health.schema.json).
 
 Checks (frozen names; the schema enum locks them in):
 

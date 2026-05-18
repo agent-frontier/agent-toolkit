@@ -24,8 +24,8 @@ narrows `2`'s trigger set.
 | 7 | package failures during `--apply` | One or more packages failed to upgrade (apt non-zero, dpkg error). The audit trail records each failed package with status `failed` | Inspect `updater-last-run.json` and the JSONL for per-package detail. May retry after dependency / disk-space fixes. |
 
 Codes `6` and `7` are **updater-only** — janitor never emits them. They
-are validated by [`schemas/updater-report.schema.json`](../../schemas/updater-report.schema.json)
-and [`schemas/updater-health.schema.json`](../../schemas/updater-health.schema.json).
+are validated by [`schemas/updater-report.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/updater-report.schema.json)
+and [`schemas/updater-health.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/updater-health.schema.json).
 
 ## Status enum (extensions)
 
@@ -117,5 +117,5 @@ relied on by agents:
 - Phased apt update delay.
 - `dnf` and `zypper` backends.
 
-These are tracked in [`../../CHANGELOG.md`](../../CHANGELOG.md). When
+These are tracked in [`../CHANGELOG.md`](../CHANGELOG.md). When
 they land, they will appear as new capability strings.

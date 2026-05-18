@@ -18,7 +18,7 @@ Configuration is loaded in this order (later sources override earlier ones):
 
 The config file is **sourced as bash**, so shell expansions (`$HOME`,
 `$(cmd)`) and comments work. See
-[examples/updater.config.example](../examples/updater.config.example)
+[examples/updater.config.example](https://github.com/agent-frontier/agent-toolkit/blob/main/examples/updater.config.example)
 for a fully-commented sample.
 
 ## Environment variable reference
@@ -72,4 +72,4 @@ With this config, a cron-driven `--apply` between 02:00 and 04:00 local
 time will upgrade only security-flagged, non-held packages and emit a
 `reboot_required` status if the kernel or another reboot-flagging
 package was upgraded (the actual reboot is stubbed in v0 — see the
-roadmap in [CHANGELOG.md](../CHANGELOG.md)).
+roadmap in [CHANGELOG.md](CHANGELOG.md)).

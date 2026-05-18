@@ -1,0 +1,47 @@
+# cert-watch configuration
+#
+# Format:        key=value (shell-sourced; bash semantics, comments with #).
+# Default path:  $XDG_CONFIG_HOME/cert-watch/config
+#                (typically ~/.config/cert-watch/config). Override via
+#                --config <path>.
+#
+# Defaults are SAFE and read-only: the tool inventories local certs and
+# probes remote endpoints, but never rotates or mutates anything.
+
+# ── Log location ──────────────────────────────────────────────────────
+# Default: $XDG_STATE_HOME/cert-watch (~/.local/state/cert-watch).
+# Holds cert-watch.log, cert-watch.jsonl, last-run.json, .health-baseline,
+# and cert-watch.lock.
+#
+# CERT_WATCH_LOG_DIR="$HOME/.local/state/cert-watch"
+
+# ── Local certificate paths ───────────────────────────────────────────
+# Colon-separated literal paths or glob patterns. Empty by default.
+#
+# CERT_WATCH_PATHS="/etc/ssl/certs/*.pem:/etc/letsencrypt/live/*/fullchain.pem"
+
+# ── Remote TLS endpoints ──────────────────────────────────────────────
+# Colon-separated host:port pairs encoded as host:port:host:port:...
+# Empty by default.
+#
+# CERT_WATCH_HOSTS="example.com:443:api.internal:8443"
+
+# ── Thresholds ────────────────────────────────────────────────────────
+# ok        > CERT_WATCH_WARN_DAYS
+# warn      CERT_WATCH_EXPIRING_DAYS+1 .. CERT_WATCH_WARN_DAYS
+# expiring  1 .. CERT_WATCH_EXPIRING_DAYS
+# expired   already expired
+#
+# CERT_WATCH_WARN_DAYS=30
+# CERT_WATCH_EXPIRING_DAYS=7
+
+# ── Remote probe timeout ──────────────────────────────────────────────
+# Seconds for each openssl s_client probe.
+#
+# CERT_WATCH_PROBE_TIMEOUT=8
+
+# ── Safety floor ──────────────────────────────────────────────────────
+# Colon-separated dirs whose inode+size must not change during the run.
+# Usually left unset for cert-watch because it is read-only.
+#
+# CERT_WATCH_SAFETY_FLOOR_DIRS="$HOME/.local/state/cert-watch"

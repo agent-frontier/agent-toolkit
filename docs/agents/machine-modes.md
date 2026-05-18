@@ -14,7 +14,7 @@ Audit-trail rollup over `$JANITOR_LOG_DIR/janitor.jsonl`.
 
 - Invocation: `system-janitor --report` (text) or `system-janitor --report --json`.
 - Exit codes: `0` always (missing/empty JSONL still emits a valid object with zero counts; invalid lines surface via `data_quality` without flipping exit).
-- Schema: [`schemas/report.schema.json`](../../schemas/report.schema.json).
+- Schema: [`schemas/report.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/report.schema.json).
 - Composes with `--only` (filters `per_section`).
 
 ```json
@@ -60,7 +60,7 @@ Read-only trust probe over the audit trail. Does not acquire the lock or create 
 
 - Invocation: `system-janitor --health` or `... --health --json`.
 - Exit codes: `0` healthy, `4` degraded, `5` unknown (log dir missing OR `last-run.json` absent).
-- Schema: [`schemas/health.schema.json`](../../schemas/health.schema.json).
+- Schema: [`schemas/health.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/health.schema.json).
 
 Checks (frozen names; the schema enum locks them in):
 

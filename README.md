@@ -23,6 +23,7 @@ The 30-second pitch ends here. Below the fold is for evaluators who want to go d
 |---|---|---|
 | [`system-janitor.sh`](system-janitor.sh) | Disk/cache/log cleanup with safety floor and audit-grade logging. Universally-safe ops by default (Docker, Go, NuGet, `/tmp/go-build*`); destructive paths gated behind config. | v0.1.0 |
 | [`system-updater.sh`](system-updater.sh) | apt package update sweep with holds, security-only mode, and maintenance windows. `--apply` requires root and is explicit (not the default). | v0.1.0 |
+| [`cert-watch.sh`](cert-watch.sh) | Read-only TLS certificate expiry monitor for local cert files and remote `host:port` endpoints, with per-cert status and audit-grade logging. | v0.1.0 |
 | **Integration** — [`mcp-server/`](mcp-server/README.md) | stdio MCP server exposing `system-janitor` and `system-updater` to Claude Desktop, Cursor, Continue, Cline, and other MCP-aware runtimes. | in repo |
 
 Candidates under consideration live in
@@ -87,6 +88,10 @@ Per-tool install / config / scheduling: see
 [docs/updater-install.md](docs/updater-install.md) (updater).
 
 ## Sample output
+
+> Want to run these live yourself? See [`demos/`](demos/) — three
+> self-contained scenarios that spin up temp state, run the toolkit,
+> and clean up. Asciinema casts forthcoming.
 
 Sanitized from a live host so the paths are portable.
 
@@ -154,6 +159,7 @@ system-janitor doctor: healthy (exit 0)
 ## Where to go next
 
 - **[docs/](docs/README.md)** — full documentation index, split by audience.
+- **Documentation site** — <https://agent-frontier.github.io/agent-toolkit/> (once Pages is enabled on the repo).
 - **Humans** start at [docs/install.md](docs/install.md) →
   [docs/configuration.md](docs/configuration.md) →
   [docs/usage.md](docs/usage.md).

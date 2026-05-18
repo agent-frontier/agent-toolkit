@@ -36,7 +36,7 @@ set -uo pipefail
 readonly VERSION="0.1.0"
 readonly TOOLKIT_NAME="agent-toolkit"
 readonly TOOLKIT_REPO="https://github.com/agent-frontier/agent-toolkit"
-readonly -a TOOLKIT_TOOLS=(system-janitor system-updater)
+readonly -a TOOLKIT_TOOLS=(cert-watch system-janitor system-updater)
 # ── end Version ────────────────────────────────────────────────────────
 
 # ── Default cron-safe environment ──────────────────────────────────────

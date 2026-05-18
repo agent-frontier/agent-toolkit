@@ -3,6 +3,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 INSTALL_SCRIPT="$REPO_ROOT/install.sh"
+CERTWATCH_SCRIPT="$REPO_ROOT/cert-watch.sh"
 JANITOR_SCRIPT="$REPO_ROOT/system-janitor.sh"
 UPDATER_SCRIPT="$REPO_ROOT/system-updater.sh"
 WORK_DIR="$REPO_ROOT/tests/.install-smoke.$$"
@@ -99,10 +100,12 @@ if os.path.realpath(install_root) != os.path.realpath(expected_root):
     raise SystemExit(f"install_root mismatch: {install_root} != {expected_root}")
 if not os.path.isfile(os.path.join(install_root, "system-janitor.sh")):
     raise SystemExit(f"install_root does not contain system-janitor.sh: {install_root}")
+if not os.path.isfile(os.path.join(install_root, "cert-watch.sh")):
+    raise SystemExit(f"install_root does not contain cert-watch.sh: {install_root}")
 tools = data["tools"]
-if not isinstance(tools, list) or len(tools) != 2:
-    raise SystemExit(f"tools must be a list of length 2: {tools!r}")
-if [tool.get("name") for tool in tools] != ["system-janitor", "system-updater"]:
+if not isinstance(tools, list) or len(tools) != 3:
+    raise SystemExit(f"tools must be a list of length 3: {tools!r}")
+if [tool.get("name") for tool in tools] != ["cert-watch", "system-janitor", "system-updater"]:
     raise SystemExit(f"unexpected tool names: {[tool.get('name') for tool in tools]!r}")
 for tool in tools:
     if not os.path.isabs(tool.get("binary", "")):
@@ -150,6 +153,8 @@ ln -s "$HOME_ONE/system-janitor/system-janitor.sh" "$HOME_ONE/.local/bin/system-
 cat > "$HOME_ONE/.crontab.stub" <<EOF
 # existing unrelated job
 5 1 * * * /usr/bin/true
+# cert-watch — daily TLS certificate inventory (managed by agent-toolkit install.sh)
+42 6 * * * $HOME_ONE/system-janitor/cert-watch.sh
 # system-janitor — weekly disk cleanup (managed by agent-toolkit install.sh)
 17 3 * * 0 $HOME_ONE/system-janitor/system-janitor.sh
 # system-updater — daily apt update sweep (managed by agent-toolkit install.sh)
@@ -159,17 +164,23 @@ EOF
 run_install "$HOME_ONE" > "$WORK_DIR/install.out"
 pass "install.sh completed"
 
+CERTWATCH_EXPECTED="$(realpath "$CERTWATCH_SCRIPT")"
 JANITOR_EXPECTED="$(realpath "$JANITOR_SCRIPT")"
 UPDATER_EXPECTED="$(realpath "$UPDATER_SCRIPT")"
+assert_symlink_target "$HOME_ONE/.local/bin/cert-watch" "$CERTWATCH_EXPECTED"
 assert_symlink_target "$HOME_ONE/.local/bin/system-janitor" "$JANITOR_EXPECTED"
 assert_symlink_target "$HOME_ONE/.local/bin/system-updater" "$UPDATER_EXPECTED"
 pass "symlinks created/repaired"
 
 CRON_FILE="$HOME_ONE/.crontab.stub"
+CERTWATCH_COMMENT='# cert-watch — daily TLS certificate inventory (managed by agent-toolkit install.sh)'
+CERTWATCH_JOB="42 6 * * * $HOME_ONE/.local/bin/cert-watch"
 JANITOR_COMMENT='# system-janitor — weekly disk cleanup (managed by agent-toolkit install.sh)'
 JANITOR_JOB="17 3 * * 0 $HOME_ONE/.local/bin/system-janitor"
 UPDATER_COMMENT='# system-updater — daily apt update sweep (managed by agent-toolkit install.sh)'
 UPDATER_JOB="23 4 * * * $HOME_ONE/.local/bin/system-updater"
+assert_one_line "$CERTWATCH_COMMENT" "$CRON_FILE"
+assert_one_line "$CERTWATCH_JOB" "$CRON_FILE"
 assert_one_line "$JANITOR_COMMENT" "$CRON_FILE"
 assert_one_line "$JANITOR_JOB" "$CRON_FILE"
 assert_one_line "$UPDATER_COMMENT" "$CRON_FILE"
@@ -189,8 +200,10 @@ pass "manifest written with expected shape"
 cp "$CRON_FILE" "$WORK_DIR/cron.before"
 run_install "$HOME_ONE" > "$WORK_DIR/install-second.out"
 cmp -s "$WORK_DIR/cron.before" "$CRON_FILE" || fail 'second install changed crontab contents'
+assert_symlink_target "$HOME_ONE/.local/bin/cert-watch" "$CERTWATCH_EXPECTED"
 assert_symlink_target "$HOME_ONE/.local/bin/system-janitor" "$JANITOR_EXPECTED"
 assert_symlink_target "$HOME_ONE/.local/bin/system-updater" "$UPDATER_EXPECTED"
+assert_one_line "$CERTWATCH_JOB" "$CRON_FILE"
 assert_one_line "$JANITOR_JOB" "$CRON_FILE"
 assert_one_line "$UPDATER_JOB" "$CRON_FILE"
 pass "second run is idempotent"
@@ -204,6 +217,7 @@ pass "manifest remains byte-identical excluding generated_at"
 echo "── dry-run ──────────────────────────────────────────────────"
 HOME_DRY="$(make_home home-dry)"
 run_install "$HOME_DRY" --dry-run > "$WORK_DIR/dry-run.out"
+[ ! -e "$HOME_DRY/.local/bin/cert-watch" ] || fail '--dry-run created cert-watch symlink'
 [ ! -e "$HOME_DRY/.local/bin/system-janitor" ] || fail '--dry-run created janitor symlink'
 [ ! -e "$HOME_DRY/.local/bin/system-updater" ] || fail '--dry-run created updater symlink'
 [ ! -e "$HOME_DRY/.crontab.stub" ] || fail '--dry-run wrote crontab stub'
@@ -219,6 +233,7 @@ grep -Fq 'manifest               : written -> ' "$WORK_DIR/quiet.out" || fail '-
 if grep -Fq 'symlink system-janitor' "$WORK_DIR/quiet.out"; then
   fail '--quiet printed full summary instead of manifest-only status'
 fi
+assert_symlink_target "$HOME_QUIET/.local/bin/cert-watch" "$CERTWATCH_EXPECTED"
 assert_symlink_target "$HOME_QUIET/.local/bin/system-janitor" "$JANITOR_EXPECTED"
 assert_symlink_target "$HOME_QUIET/.local/bin/system-updater" "$UPDATER_EXPECTED"
 [ -f "$HOME_QUIET/.crontab.stub" ] || fail '--quiet run did not install cron entries'

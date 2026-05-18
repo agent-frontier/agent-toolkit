@@ -63,7 +63,7 @@ system-updater --report --json   # for agents and pipelines
 The JSON shape is documented in
 [agents/updater-machine-modes.md](./agents/updater-machine-modes.md#--report---json)
 and pinned by
-[`schemas/updater-report.schema.json`](../schemas/updater-report.schema.json).
+[`schemas/updater-report.schema.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/schemas/updater-report.schema.json).
 
 ## Trust probe with `--health`
 
