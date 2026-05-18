@@ -1,0 +1,41 @@
+# log-shipper configuration
+#
+# Format:        key=value (shell-sourced; bash semantics, comments with #).
+# Default path:  $XDG_CONFIG_HOME/log-shipper/config
+#                (typically ~/.config/log-shipper/config). Override via
+#                --config <path>.
+#
+# log-shipper is read-only. It never mutates the source JSONL it reads.
+
+# ── Log location ──────────────────────────────────────────────────────
+# Default: $XDG_STATE_HOME/log-shipper (~/.local/state/log-shipper).
+# Holds log-shipper.log, log-shipper.jsonl, last-run.json,
+# .health-baseline, and log-shipper.lock.
+#
+# LOG_SHIPPER_LOG_DIR="$HOME/.local/state/log-shipper"
+
+# ── Source JSONL files ────────────────────────────────────────────────
+# Colon-separated literal paths or glob patterns. Empty by default; when
+# empty, log-shipper auto-discovers sibling toolkit audit logs from
+# ~/.config/agent-toolkit/manifest.json.
+#
+# LOG_SHIPPER_SOURCES="$HOME/.local/state/janitor/janitor.jsonl:$HOME/.local/state/system-updater/updater.jsonl"
+
+# ── Output destinations ───────────────────────────────────────────────
+# Any combination may be configured. Empty means that output format is off.
+# NDJSON may use - for stdout.
+#
+# LOG_SHIPPER_PROM_OUT="/var/lib/node_exporter/textfile_collector/agent_toolkit.prom"
+# LOG_SHIPPER_NDJSON_OUT="-"
+# LOG_SHIPPER_OTLP_JSON_OUT="$HOME/agent-toolkit-otlp.json"
+
+# ── Lookback window ───────────────────────────────────────────────────
+# Source events older than this many hours are ignored.
+#
+# LOG_SHIPPER_LOOKBACK_HOURS=24
+
+# ── Safety floor ──────────────────────────────────────────────────────
+# Colon-separated dirs whose inode+size must not change during the run.
+# Usually left unset because log-shipper is read-only.
+#
+# LOG_SHIPPER_SAFETY_FLOOR_DIRS="$HOME/.local/state/log-shipper"

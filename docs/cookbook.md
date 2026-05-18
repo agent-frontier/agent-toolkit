@@ -17,9 +17,11 @@ Where a recipe parses JSON, prefer the documented contracts over ad-hoc grep.
 
 ## 1) Prometheus exporter for `last-run.json`
 
+**Recommended**: use `log-shipper.sh` (ships with the toolkit). See [docs/log-shipper.md](./log-shipper.md).
+
 **Why you'd want this**: this turns the O(1) `last-run.json` snapshot into cheap Prometheus signals so you can alert on silent failure (the tool stopped running, or a section has gone stale) without reparsing the full audit log on every scrape.
 
-**Copy-paste**
+**Alternative (no toolkit)**
 
 Create a tiny textfile-collector writer. It reads
 `~/.local/state/janitor/last-run.json`, converts the canonical janitor fields
@@ -373,6 +375,16 @@ Current `install.sh` writes this shape:
   "install_root": "/home/example/agent-toolkit",
   "generated_at": "2026-05-18T19:52:26Z",
   "tools": [
+    {
+      "name": "cert-watch",
+      "binary": "/home/example/.local/bin/cert-watch",
+      "source": "/home/example/agent-toolkit/cert-watch.sh"
+    },
+    {
+      "name": "log-shipper",
+      "binary": "/home/example/.local/bin/log-shipper",
+      "source": "/home/example/agent-toolkit/log-shipper.sh"
+    },
     {
       "name": "system-janitor",
       "binary": "/home/example/.local/bin/system-janitor",

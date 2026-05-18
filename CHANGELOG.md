@@ -14,10 +14,13 @@ codes, status enums, capability strings) over human-facing UX.
 
 ### Added
 
+- `log-shipper.sh` — fourth shipped toolkit tool: read-only audit-trail exporter that re-emits janitor / updater / cert-watch JSONL into Prometheus textfile, NDJSON, and OTLP-shaped JSON outputs.
+- `tests/log-shipper-smoke.sh`, `schemas/log-shipper-{report,health}.schema.json`, `docs/log-shipper*.md`, `docs/agents/log-shipper-*.md`, and `examples/log-shipper.config.example` — full schema/doc/test/example surface for log-shipper.
+- `install.sh` and `tests/install-smoke.sh` now manage `log-shipper` alongside the other toolkit tools (symlink, hourly cron entry, manifest tool list).
 - `cert-watch.sh` — third shipped toolkit tool: read-only TLS certificate expiry monitor for local cert files and remote endpoints, with per-cert status enum, machine modes, JSONL audit trail, and atomic `last-run.json`.
 - `schemas/cert-watch-{report,health}.schema.json`, `tests/cert-watch-smoke.sh`, `docs/cert-watch*.md`, `docs/agents/cert-watch-*.md`, and `examples/cert-watch.config.example` — full schema/doc/test/example surface for cert-watch.
 - `install.sh` and `tests/install-smoke.sh` now manage `cert-watch` alongside `system-janitor` and `system-updater` (symlink, cron entry, manifest tool list).
-- `AGENTS.md` now describes the toolkit as shipping three single-file Bash tools.
+- `AGENTS.md` now describes the toolkit as shipping four single-file Bash tools.
 - `scripts/bootstrap.sh` — curl|bash-friendly bootstrap installer that
   clones or updates `agent-toolkit`, checks out a requested ref, then
   execs `./install.sh` with any remaining args.

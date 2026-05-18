@@ -140,7 +140,7 @@ expected = [
   "version-json",
 ]
 assert obj["capabilities"] == expected, (obj["capabilities"], expected)
-assert obj["toolkit"]["tools"] == ["cert-watch", "system-janitor", "system-updater"], obj["toolkit"]
+assert obj["toolkit"]["tools"] == ["cert-watch", "log-shipper", "system-janitor", "system-updater"], obj["toolkit"]
 PY
 pass "--version --json exposes exact 16-capability set and 3-tool manifest"
 

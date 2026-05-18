@@ -30,6 +30,25 @@ tables below summarize for humans. Both must move together.
     "version",
     "version-json"
   ],
+  "log-shipper": [
+    "auto-discover-sources",
+    "doctor",
+    "doctor-json",
+    "health",
+    "health-acknowledge",
+    "health-json",
+    "ndjson-export",
+    "only",
+    "otlp-json-export",
+    "prometheus-textfile",
+    "report",
+    "report-json",
+    "schemas",
+    "sections",
+    "toolkit-manifest",
+    "version",
+    "version-json"
+  ],
   "system-janitor": [
     "aged-logs",
     "doctor",
@@ -78,7 +97,7 @@ corresponding implementation and smoke probe in the same commit.
 
 ## Shared capabilities (identical semantics across tools)
 
-These eleven capability strings appear in multiple tools' arrays and mean
+These thirteen capability strings appear in multiple tools' arrays and mean
 the same thing everywhere they appear. Agents probing `--version --json`
 can rely on identical contracts; any divergence is a bug.
 
@@ -89,9 +108,11 @@ can rely on identical contracts; any divergence is a bug.
 | `health` | `--health` prints a human-readable health summary over the tool's persisted audit/state files. |
 | `health-acknowledge` | `--health-acknowledge` writes a byte-offset baseline into `.health-baseline` so prior JSONL lines are excluded from `jsonl_parses` and similar checks. Atomic tmp+rename. |
 | `health-json` | `--health --json` emits a stable JSON object with top-level health metadata plus a `checks[]` array. |
-| `only` | `--only <list>` filters the run scope (sections for cert-watch and janitor, packages for updater); non-matching items are omitted from JSONL and the report. |
+| `only` | `--only <list>` filters the run scope (sections for cert-watch, log-shipper, and janitor; packages for updater); non-matching items are omitted from JSONL and the report. |
 | `report` | `--report` reads the JSONL audit trail and prints a human-readable summary of prior runs. |
 | `report-json` | `--report --json` emits a machine-readable summary validated by the tool's `schemas/<tool>-report.schema.json`. |
+| `schemas` | Formal Draft 2020-12 JSON Schemas exist for the tool's machine-mode `--report --json` and `--health --json` output under `schemas/`. |
+| `sections` | `--sections <list>` is accepted as a synonym for `--only <list>`. |
 | `toolkit-manifest` | `--version --json` includes a top-level `toolkit` object with the toolkit name, canonical repo URL, and sibling tool names so agents can discover the rest of the family. |
 | `version` | `--version` prints `<tool-name> <semver>` on stdout; exit `0`. |
 | `version-json` | `--version --json` emits `{name, version, capabilities[], toolkit}` where `capabilities[]` is the array this file describes. |
@@ -103,8 +124,15 @@ can rely on identical contracts; any divergence is a bug.
 | `cert-hosts` | The tool can probe remote TLS endpoints declared as colon-encoded `host:port` pairs in `CERT_WATCH_HOSTS`. |
 | `cert-paths` | The tool can inventory local certificate files from literal paths or glob patterns in `CERT_WATCH_PATHS`. |
 | `cert-status-enum` | Per-cert status values (`ok`, `warn`, `expiring`, `expired`) are distinct from the run aggregate status (`ok`, `warn`, `error`). |
-| `schemas` | Formal Draft 2020-12 JSON Schemas exist for `--report --json` and `--health --json` under `schemas/`. |
-| `sections` | `--sections <list>` is accepted as a synonym for `--only <list>`. |
+
+## `log-shipper`-only capabilities
+
+| Capability | Semantics |
+|---|---|
+| `auto-discover-sources` | When `LOG_SHIPPER_SOURCES` is empty, the tool discovers sibling toolkit audit logs from `~/.config/agent-toolkit/manifest.json` plus documented default state-dir paths. |
+| `ndjson-export` | The tool can re-emit recent source events as NDJSON, enriched with `tool`, `source_path`, and `shipped_at`. |
+| `otlp-json-export` | The tool can write a static OTLP-shaped JSON payload (`resourceLogs[].scopeLogs[].logRecords[]`) for the recent source window. |
+| `prometheus-textfile` | The tool can write Prometheus textfile-collector output with per-event counters/gauges derived from sibling audit logs. |
 
 ## `system-janitor`-only capabilities
 

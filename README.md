@@ -11,7 +11,7 @@
 
 ## What it does
 
-Linux servers slowly fill up, packages drift, and unattended maintenance jobs become hard to trust when they mutate a machine without leaving behind a machine-readable trail. Agent-first ops tools for autonomous LLM agents operating Linux servers without supervision. The toolkit solves that by shipping two boring, production-grade cron tools: one for cleanup, one for apt updates.
+Linux servers slowly fill up, packages drift, and unattended maintenance jobs become hard to trust when they mutate a machine without leaving behind a machine-readable trail. Agent-first ops tools for autonomous LLM agents operating Linux servers without supervision. The toolkit solves that by shipping four boring, production-grade cron tools: cleanup, apt updates, certificate expiry checks, and audit-trail export.
 
 Every tool shares one contract: capability discovery via `--version --json`, structured machine-mode output (`--report --json`, `--health --json`), append-only JSONL audit trail, atomic state writes, `flock` single-instance, `--dry-run` default on destructive paths, frozen exit codes, and cron-safe operation. The toolkit is deliberately Bash + Linux-specific. Agents can `cat` the source to understand intent during incident response — no opaque binaries, no build step, no runtime dependencies beyond what every server already ships (bash 4+, coreutils, `flock`, `python3` for JSON output). Humans run them from cron; agents drive them as tools.
 
@@ -24,6 +24,7 @@ The 30-second pitch ends here. Below the fold is for evaluators who want to go d
 | [`system-janitor.sh`](system-janitor.sh) | Disk/cache/log cleanup with safety floor and audit-grade logging. Universally-safe ops by default (Docker, Go, NuGet, `/tmp/go-build*`); destructive paths gated behind config. | v0.1.0 |
 | [`system-updater.sh`](system-updater.sh) | apt package update sweep with holds, security-only mode, and maintenance windows. `--apply` requires root and is explicit (not the default). | v0.1.0 |
 | [`cert-watch.sh`](cert-watch.sh) | Read-only TLS certificate expiry monitor for local cert files and remote `host:port` endpoints, with per-cert status and audit-grade logging. | v0.1.0 |
+| [`log-shipper.sh`](log-shipper.sh) | exports the audit trail to Prometheus / NDJSON / OTLP for monitoring | v0.1.0 |
 | **Integration** — [`mcp-server/`](mcp-server/README.md) | stdio MCP server exposing `system-janitor` and `system-updater` to Claude Desktop, Cursor, Continue, Cline, and other MCP-aware runtimes. | in repo |
 
 Candidates under consideration live in
@@ -153,7 +154,7 @@ system-janitor doctor: healthy (exit 0)
 ### `system-janitor --version --json`
 
 ```json
-{"name":"system-janitor","version":"0.1.0","capabilities":["aged-logs","doctor","doctor-json","extra-cleanup-globs","health","health-acknowledge","health-json","idle-status","json-schemas","last-run-sections","only","report","report-bytes","report-json","schema-aliases","toolkit-manifest","version","version-json"],"toolkit":{"name":"agent-toolkit","repo":"https://github.com/agent-frontier/agent-toolkit","tools":["system-janitor","system-updater"]}}
+{"name":"system-janitor","version":"0.1.0","capabilities":["aged-logs","doctor","doctor-json","extra-cleanup-globs","health","health-acknowledge","health-json","idle-status","json-schemas","last-run-sections","only","report","report-bytes","report-json","schema-aliases","toolkit-manifest","version","version-json"],"toolkit":{"name":"agent-toolkit","repo":"https://github.com/agent-frontier/agent-toolkit","tools":["cert-watch","log-shipper","system-janitor","system-updater"]}}
 ```
 
 ## Where to go next

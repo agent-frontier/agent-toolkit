@@ -8,8 +8,9 @@ usage() {
   cat <<'EOF'
 Usage: ./install.sh [--dry-run] [--quiet]
 
-Create or repair ~/.local/bin symlinks for cert-watch, system-janitor, and
-system-updater, and install the managed cron entries for all three tools.
+Create or repair ~/.local/bin symlinks for cert-watch, log-shipper,
+system-janitor, and system-updater, and install the managed cron entries
+for all four tools.
 
 Options:
   --dry-run   Preview changes without modifying symlinks or crontab
@@ -69,6 +70,7 @@ REPO_DIR="$(resolve_path "$SCRIPT_DIR")" || die 'failed to resolve repository pa
 CERTWATCH_TARGET="$(resolve_path "$REPO_DIR/cert-watch.sh")" || die 'cert-watch.sh not found next to install.sh'
 JANITOR_TARGET="$(resolve_path "$REPO_DIR/system-janitor.sh")" || die 'system-janitor.sh not found next to install.sh'
 UPDATER_TARGET="$(resolve_path "$REPO_DIR/system-updater.sh")" || die 'system-updater.sh not found next to install.sh'
+LOG_SHIPPER_TARGET="$(resolve_path "$REPO_DIR/log-shipper.sh")" || die 'log-shipper.sh not found next to install.sh'
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 case "$CONFIG_HOME" in
   /*) ;;
@@ -76,12 +78,15 @@ case "$CONFIG_HOME" in
 esac
 BIN_DIR="$HOME/.local/bin"
 CERTWATCH_LINK="$BIN_DIR/cert-watch"
+LOG_SHIPPER_LINK="$BIN_DIR/log-shipper"
 JANITOR_LINK="$BIN_DIR/system-janitor"
 UPDATER_LINK="$BIN_DIR/system-updater"
 MANIFEST_DIR="$CONFIG_HOME/agent-toolkit"
 MANIFEST_PATH="$MANIFEST_DIR/manifest.json"
 CERTWATCH_COMMENT='# cert-watch — daily TLS certificate inventory (managed by agent-toolkit install.sh)'
 CERTWATCH_JOB="42 6 * * * $CERTWATCH_LINK"
+LOG_SHIPPER_COMMENT='# log-shipper — hourly audit-trail export (managed by agent-toolkit install.sh)'
+LOG_SHIPPER_JOB="7 * * * * $LOG_SHIPPER_LINK"
 JANITOR_COMMENT='# system-janitor — weekly disk cleanup (managed by agent-toolkit install.sh)'
 JANITOR_JOB="17 3 * * 0 $JANITOR_LINK"
 UPDATER_COMMENT='# system-updater — daily apt update sweep (managed by agent-toolkit install.sh)'
@@ -106,6 +111,12 @@ if [ -z "$UPDATER_VERSION" ]; then
 elif [ "$UPDATER_VERSION" != "$TOOLKIT_VERSION" ]; then
   warn "VERSION mismatch: system-janitor=$TOOLKIT_VERSION system-updater=$UPDATER_VERSION"
 fi
+LOG_SHIPPER_VERSION="$(extract_version "$LOG_SHIPPER_TARGET")"
+if [ -z "$LOG_SHIPPER_VERSION" ]; then
+  warn 'failed to extract VERSION from log-shipper.sh for consistency check'
+elif [ "$LOG_SHIPPER_VERSION" != "$TOOLKIT_VERSION" ]; then
+  warn "VERSION mismatch: system-janitor=$TOOLKIT_VERSION log-shipper=$LOG_SHIPPER_VERSION"
+fi
 
 append_line() {
   local line="$1"
@@ -126,12 +137,12 @@ ensure_bin_dir() {
 }
 
 build_manifest_content() {
-  python3 - "$TOOLKIT_VERSION" "$REPO_DIR" "$CERTWATCH_LINK" "$CERTWATCH_TARGET" "$JANITOR_LINK" "$JANITOR_TARGET" "$UPDATER_LINK" "$UPDATER_TARGET" "$REPO_DIR/AGENTS.md" "$REPO_DIR/docs/agents/" <<'PY'
+  python3 - "$TOOLKIT_VERSION" "$REPO_DIR" "$CERTWATCH_LINK" "$CERTWATCH_TARGET" "$LOG_SHIPPER_LINK" "$LOG_SHIPPER_TARGET" "$JANITOR_LINK" "$JANITOR_TARGET" "$UPDATER_LINK" "$UPDATER_TARGET" "$REPO_DIR/AGENTS.md" "$REPO_DIR/docs/agents/" <<'PY'
 import datetime
 import json
 import sys
 
-version, install_root, certwatch_bin, certwatch_src, janitor_bin, janitor_src, updater_bin, updater_src, agents_md, agents_dir = sys.argv[1:]
+version, install_root, certwatch_bin, certwatch_src, log_shipper_bin, log_shipper_src, janitor_bin, janitor_src, updater_bin, updater_src, agents_md, agents_dir = sys.argv[1:]
 manifest = {
     "name": "agent-toolkit",
     "version": version,
@@ -139,6 +150,7 @@ manifest = {
     "generated_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "tools": [
         {"name": "cert-watch", "binary": certwatch_bin, "source": certwatch_src},
+        {"name": "log-shipper", "binary": log_shipper_bin, "source": log_shipper_src},
         {"name": "system-janitor", "binary": janitor_bin, "source": janitor_src},
         {"name": "system-updater", "binary": updater_bin, "source": updater_src},
     ],
@@ -262,6 +274,9 @@ tool_matches_cron_line() {
     updater)
       [[ "$line" =~ (^|[[:space:]])([^[:space:]]*/)?system-updater(\.sh)?([[:space:]]|$) ]]
       ;;
+    log-shipper)
+      [[ "$line" =~ (^|[[:space:]])([^[:space:]]*/)?log-shipper(\.sh)?([[:space:]]|$) ]]
+      ;;
     *)
       return 1
       ;;
@@ -303,6 +318,10 @@ analyze_crontab() {
   UPDATER_JOB_COUNT=0
   UPDATER_RELATED_COUNT=0
   UPDATER_STALE_COUNT=0
+  LOG_SHIPPER_COMMENT_COUNT=0
+  LOG_SHIPPER_JOB_COUNT=0
+  LOG_SHIPPER_RELATED_COUNT=0
+  LOG_SHIPPER_STALE_COUNT=0
   APPEND_BUFFER=''
 
   while IFS= read -r line || [ -n "$line" ]; do
@@ -316,6 +335,10 @@ analyze_crontab() {
     fi
     if [ "$line" = "$UPDATER_COMMENT" ]; then
       UPDATER_COMMENT_COUNT=$((UPDATER_COMMENT_COUNT + 1))
+      continue
+    fi
+    if [ "$line" = "$LOG_SHIPPER_COMMENT" ]; then
+      LOG_SHIPPER_COMMENT_COUNT=$((LOG_SHIPPER_COMMENT_COUNT + 1))
       continue
     fi
     # Drop stale comments left over from older installations (pre-rename
@@ -335,6 +358,11 @@ analyze_crontab() {
       \#*system-updater*)
         UPDATER_RELATED_COUNT=$((UPDATER_RELATED_COUNT + 1))
         UPDATER_STALE_COUNT=$((UPDATER_STALE_COUNT + 1))
+        continue
+        ;;
+      \#*log-shipper*)
+        LOG_SHIPPER_RELATED_COUNT=$((LOG_SHIPPER_RELATED_COUNT + 1))
+        LOG_SHIPPER_STALE_COUNT=$((LOG_SHIPPER_STALE_COUNT + 1))
         continue
         ;;
     esac
@@ -365,6 +393,15 @@ analyze_crontab() {
       fi
       continue
     fi
+    if tool_matches_cron_line "$line" log-shipper; then
+      LOG_SHIPPER_RELATED_COUNT=$((LOG_SHIPPER_RELATED_COUNT + 1))
+      if [ "$line" = "$LOG_SHIPPER_JOB" ]; then
+        LOG_SHIPPER_JOB_COUNT=$((LOG_SHIPPER_JOB_COUNT + 1))
+      else
+        LOG_SHIPPER_STALE_COUNT=$((LOG_SHIPPER_STALE_COUNT + 1))
+      fi
+      continue
+    fi
     append_line "$line"
   done <<< "$current"
 
@@ -390,6 +427,14 @@ analyze_crontab() {
     UPDATER_CRON_STATUS='created'
   else
     UPDATER_CRON_STATUS='repaired'
+  fi
+
+  if [ "$LOG_SHIPPER_COMMENT_COUNT" -eq 1 ] && [ "$LOG_SHIPPER_JOB_COUNT" -eq 1 ] && [ "$LOG_SHIPPER_RELATED_COUNT" -eq 1 ] && [ "$LOG_SHIPPER_STALE_COUNT" -eq 0 ]; then
+    LOG_SHIPPER_CRON_STATUS='already-present'
+  elif [ "$LOG_SHIPPER_COMMENT_COUNT" -eq 0 ] && [ "$LOG_SHIPPER_RELATED_COUNT" -eq 0 ]; then
+    LOG_SHIPPER_CRON_STATUS='created'
+  else
+    LOG_SHIPPER_CRON_STATUS='repaired'
   fi
 }
 
@@ -418,6 +463,10 @@ write_managed_crontab() {
   rebuilt+="$UPDATER_COMMENT"
   rebuilt+=$'\n'
   rebuilt+="$UPDATER_JOB"
+  rebuilt+=$'\n\n'
+  rebuilt+="$LOG_SHIPPER_COMMENT"
+  rebuilt+=$'\n'
+  rebuilt+="$LOG_SHIPPER_JOB"
 
   if [ "$DRY_RUN" -eq 0 ]; then
     printf '%s\n' "$rebuilt" | crontab - || die 'failed to install updated crontab'
@@ -430,14 +479,16 @@ analyze_crontab "$CURRENT_CRONTAB"
 
 ensure_bin_dir
 ensure_symlink "$CERTWATCH_LINK" "$CERTWATCH_TARGET" CERTWATCH_LINK_STATUS
+ensure_symlink "$LOG_SHIPPER_LINK" "$LOG_SHIPPER_TARGET" LOG_SHIPPER_LINK_STATUS
 ensure_symlink "$JANITOR_LINK" "$JANITOR_TARGET" JANITOR_LINK_STATUS
 ensure_symlink "$UPDATER_LINK" "$UPDATER_TARGET" UPDATER_LINK_STATUS
 
 CERTWATCH_CRON_SUMMARY="$(with_dry_prefix "$CERTWATCH_CRON_STATUS")"
+LOG_SHIPPER_CRON_SUMMARY="$(with_dry_prefix "$LOG_SHIPPER_CRON_STATUS")"
 JANITOR_CRON_SUMMARY="$(with_dry_prefix "$JANITOR_CRON_STATUS")"
 UPDATER_CRON_SUMMARY="$(with_dry_prefix "$UPDATER_CRON_STATUS")"
 
-if [ "$CERTWATCH_CRON_STATUS" != 'already-present' ] || [ "$JANITOR_CRON_STATUS" != 'already-present' ] || [ "$UPDATER_CRON_STATUS" != 'already-present' ]; then
+if [ "$CERTWATCH_CRON_STATUS" != 'already-present' ] || [ "$LOG_SHIPPER_CRON_STATUS" != 'already-present' ] || [ "$JANITOR_CRON_STATUS" != 'already-present' ] || [ "$UPDATER_CRON_STATUS" != 'already-present' ]; then
   write_managed_crontab
 fi
 
@@ -445,9 +496,11 @@ write_manifest
 
 log "agent-toolkit install summary:"
 log "  symlink cert-watch     : $CERTWATCH_LINK_STATUS -> $CERTWATCH_TARGET"
+log "  symlink log-shipper    : $LOG_SHIPPER_LINK_STATUS -> $LOG_SHIPPER_TARGET"
 log "  symlink system-janitor : $JANITOR_LINK_STATUS -> $JANITOR_TARGET"
 log "  symlink system-updater : $UPDATER_LINK_STATUS -> $UPDATER_TARGET"
 log "  cron cert-watch        : $CERTWATCH_CRON_SUMMARY"
+log "  cron log-shipper       : $LOG_SHIPPER_CRON_SUMMARY"
 log "  cron system-janitor    : $JANITOR_CRON_SUMMARY"
 log "  cron system-updater    : $UPDATER_CRON_SUMMARY"
 log "  manifest               : $MANIFEST_SUMMARY -> $MANIFEST_PATH"

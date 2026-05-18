@@ -2,7 +2,7 @@
 
 > **Two roadmaps live in this repo.** This file (`toolkit-roadmap.md`) is the
 > catalog of sibling **tool ideas** plus a historical note for ideas that
-> graduated into shipped tools (currently `cert-watch.sh`). The promotion /
+> graduated into shipped tools (currently `cert-watch.sh` and `log-shipper.sh`). The promotion /
 > visibility / adoption track lives in
 > [`../promotion-roadmap.md`](../promotion-roadmap.md). They don't overlap.
 
@@ -16,9 +16,10 @@
 > entries explicitly marked shipped are committed work. CHANGELOG owns
 > commitments; this file owns the menu.
 
-The repo currently ships three Linux-only Bash tools — `cert-watch.sh`
-(TLS expiry monitor), `system-janitor.sh` (disk/cache cleanup), and
-`system-updater.sh` (apt). They share an agent contract: capability
+The repo currently ships four Linux-only Bash tools — `cert-watch.sh`
+(TLS expiry monitor), `log-shipper.sh` (audit-trail exporter),
+`system-janitor.sh` (disk/cache cleanup), and `system-updater.sh` (apt).
+They share an agent contract: capability
 discovery, JSONL audit trail, atomic state writes,
 `flock` single-instance, `--dry-run` default for destructive paths,
 machine-mode `--report`/`--health`/`--health-acknowledge`, schemas under
@@ -107,6 +108,16 @@ secrets dirs), parses x509, reports days-to-expiry per cert.
 - Hard parts: SNI selection per host, STARTTLS variants (SMTP/IMAP/
   LDAP), client-cert-required endpoints (skip vs warn?), CT-log
   cross-check (probably out of v0).
+
+### log-shipper (shipped)
+
+Audit-trail exporter. Shipped as `log-shipper.sh`; reads the sibling toolkit JSONL audit logs and re-emits a lookback window as Prometheus textfile output, NDJSON, or OTLP-shaped JSON.
+
+- Risk: **read-only**.
+- OS: **linux-only**.
+- Agent value: **high**. Monitoring systems want the toolkit's audit trail without reparsing multiple JSONL files independently.
+- Prior art: bespoke jq exporters, node_exporter textfile scripts, Vector / fluent-bit file tails.
+- Hard parts: keeping the export static and machine-safe without turning the toolkit into a daemon or telemetry stack.
 
 ### disk-health
 

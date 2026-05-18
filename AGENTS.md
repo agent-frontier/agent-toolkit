@@ -1,7 +1,7 @@
 # Copilot instructions for agent-toolkit
 
 > First-encounter brief for agents working *on* this project. The toolkit
-> currently ships three scripts; this document captures the conventions
+> currently ships four scripts; this document captures the conventions
 > they share. For deep references when *consuming* a tool's machine-mode
 > output, see [`docs/agents/`](../docs/agents/README.md):
 > [`machine-modes.md`](../docs/agents/machine-modes.md) (invocation +
@@ -14,10 +14,11 @@
 > [`docs/agents/updater-contracts.md`](../docs/agents/updater-contracts.md).
 
 The `agent-toolkit` project (repo `agent-frontier/agent-toolkit`,
-formerly `system-janitor`) hosts three single-file Bash tools sharing
+formerly `system-janitor`) hosts four single-file Bash tools sharing
 one agent contract:
 
 - `cert-watch.sh` (~1000 lines) — TLS certificate expiry monitor
+- `log-shipper.sh` (~1100 lines) — audit-trail exporter (Prometheus / NDJSON / OTLP)
 - `system-janitor.sh` (~1700 lines) — disk/cache/log cleanup
 - `system-updater.sh` (~1400 lines) — apt update sweep
 

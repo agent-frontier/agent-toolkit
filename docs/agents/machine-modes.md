@@ -140,7 +140,7 @@ Capability discovery surface. Read-only; requires no state (not even `HOME`).
   "toolkit": {
     "name": "agent-toolkit",
     "repo": "https://github.com/agent-frontier/agent-toolkit",
-    "tools": ["system-janitor", "system-updater"]
+    "tools": ["cert-watch", "log-shipper", "system-janitor", "system-updater"]
   }
 }
 ```

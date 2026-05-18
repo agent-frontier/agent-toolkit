@@ -93,7 +93,7 @@ Capability discovery surface.
   "toolkit": {
     "name": "agent-toolkit",
     "repo": "https://github.com/agent-frontier/agent-toolkit",
-    "tools": ["cert-watch", "system-janitor", "system-updater"]
+    "tools": ["cert-watch", "log-shipper", "system-janitor", "system-updater"]
   }
 }
 ```

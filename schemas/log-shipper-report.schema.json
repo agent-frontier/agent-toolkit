@@ -1,0 +1,146 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/agent-frontier/agent-toolkit/schemas/log-shipper-report.schema.json",
+  "title": "log-shipper --report --json output",
+  "description": "Schema for the single JSON object emitted by `log-shipper.sh --report --json`.",
+  "type": "object",
+  "additionalProperties": true,
+  "required": [
+    "log_dir",
+    "jsonl_path",
+    "generated_at",
+    "total_events",
+    "total_runs",
+    "real_runs",
+    "dry_runs",
+    "total_sources",
+    "sources",
+    "by_tool",
+    "outputs",
+    "idle_streaks",
+    "manifest_drift",
+    "most_recent_run",
+    "data_quality"
+  ],
+  "properties": {
+    "log_dir": {"type": "string"},
+    "jsonl_path": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "total_events": {"type": "integer", "minimum": 0},
+    "total_runs": {"type": "integer", "minimum": 0},
+    "real_runs": {"type": "integer", "minimum": 0},
+    "dry_runs": {"type": "integer", "minimum": 0},
+    "total_sources": {"type": "integer", "minimum": 0},
+    "sources": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["path", "tool", "events_in_window", "last_event_ts"],
+        "properties": {
+          "path": {"type": "string"},
+          "tool": {"type": "string", "enum": ["cert-watch", "janitor", "updater", "unknown"]},
+          "events_in_window": {"type": "integer", "minimum": 0},
+          "last_event_ts": {"type": ["string", "null"]}
+        }
+      }
+    },
+    "by_tool": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["events", "last_run_status", "last_success_ts", "safety_integrity_ok", "idle_streak_len"],
+        "properties": {
+          "events": {"type": "integer", "minimum": 0},
+          "last_run_status": {"type": "string"},
+          "last_success_ts": {"type": ["string", "null"]},
+          "safety_integrity_ok": {"type": "integer", "enum": [0, 1]},
+          "idle_streak_len": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "outputs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["format", "path", "last_write_ts", "bytes"],
+        "properties": {
+          "format": {"type": "string", "enum": ["prom", "ndjson", "otlp-json"]},
+          "path": {"type": "string"},
+          "last_write_ts": {"type": ["string", "null"]},
+          "bytes": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "idle_streaks": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["section", "consecutive_idle_runs", "last_productive_run"],
+        "properties": {
+          "section": {"type": "string", "enum": ["transform_emit"]},
+          "consecutive_idle_runs": {"type": "integer", "minimum": 0},
+          "last_productive_run": {
+            "oneOf": [
+              {"type": "null"},
+              {
+                "type": "object",
+                "additionalProperties": true,
+                "required": ["run_id", "ts"],
+                "properties": {
+                  "run_id": {"type": "string"},
+                  "ts": {"type": "string"}
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "manifest_drift": {
+      "type": "array",
+      "items": {"type": "string"}
+    },
+    "most_recent_run": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["run_id", "finished", "status", "dry_run", "total_sources", "total_events_shipped"],
+          "properties": {
+            "run_id": {"type": "string"},
+            "finished": {"type": "string"},
+            "status": {"type": "string"},
+            "dry_run": {"type": "integer", "enum": [0, 1]},
+            "total_sources": {"type": "integer", "minimum": 0},
+            "total_events_shipped": {"type": "integer", "minimum": 0}
+          }
+        }
+      ]
+    },
+    "data_quality": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["invalid_lines", "examples"],
+      "properties": {
+        "invalid_lines": {"type": "integer", "minimum": 0},
+        "examples": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true,
+            "required": ["line", "error"],
+            "properties": {
+              "line": {"type": "integer"},
+              "error": {"type": "string"}
+            }
+          }
+        }
+      }
+    }
+  }
+}
