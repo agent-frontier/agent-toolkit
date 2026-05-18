@@ -35,7 +35,8 @@ files; they only clear caches the toolchain knows how to regenerate.
 | Section | Config |
 |---|---|
 | `workspace_binobj` | `JANITOR_WORKSPACE_DIRS` — colon-separated dirs scanned for `bin/` and `obj/` (.NET build outputs) |
-| `extra_cleanup` | `JANITOR_EXTRA_CLEANUP_DIRS` — colon-separated dirs to remove entirely |
+| `extra_cleanup` | `JANITOR_EXTRA_CLEANUP_DIRS` — colon-separated dirs to remove entirely. Items containing glob metacharacters (`*`, `?`, `[`) are expanded at runtime, so patterns like `/tmp/build-*-target` work. |
+| `aged_logs` | `JANITOR_AGED_LOG_DIRS` — colon-separated dirs whose files older than `JANITOR_AGED_LOG_DAYS` (default 7) are deleted recursively. Directories are preserved; only stale files are pruned. |
 | `safety_integrity` | `JANITOR_SAFETY_FLOOR_DIRS` — colon-separated dirs whose inode and total byte size must NOT change during the run |
 
 ## Environment variable reference
@@ -43,7 +44,9 @@ files; they only clear caches the toolchain knows how to regenerate.
 | Variable | Default | Purpose |
 |---|---|---|
 | `JANITOR_WORKSPACE_DIRS` | (unset) | Colon-separated dirs to scan for `bin/`/`obj/` |
-| `JANITOR_EXTRA_CLEANUP_DIRS` | (unset) | Colon-separated dirs to remove entirely |
+| `JANITOR_EXTRA_CLEANUP_DIRS` | (unset) | Colon-separated dirs to remove entirely (glob patterns supported) |
+| `JANITOR_AGED_LOG_DIRS` | (unset) | Colon-separated dirs whose old files are pruned |
+| `JANITOR_AGED_LOG_DAYS` | `7` | Age threshold in days for `aged_logs` |
 | `JANITOR_SAFETY_FLOOR_DIRS` | (unset) | Colon-separated dirs whose inode+size must not change |
 | `JANITOR_DOCKER_PRUNE` | `yes` | Run `docker system prune` |
 | `JANITOR_DOCKER_VOLUMES` | `yes` | Pass `--volumes` to docker prune |

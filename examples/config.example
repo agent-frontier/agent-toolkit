@@ -38,9 +38,24 @@
 # Useful for caches that aren't covered by the built-in sections.
 # Setting this value is what opts the extra_cleanup section in.
 #
+# Items containing glob metacharacters (* ? [) are expanded against
+# the filesystem at runtime, so patterns are supported. Literal paths
+# that don't exist log "[skip] already absent" (useful signal).
+#
 # Examples (uncomment selectively):
 #
 #   JANITOR_EXTRA_CLEANUP_DIRS="$HOME/.cache/some-tool:$HOME/.cache/playwright-old"
+#   JANITOR_EXTRA_CLEANUP_DIRS="/tmp/scratchd-*-target:$HOME/.cache/scratchd-*-target"
+
+# ── Aged logs ─────────────────────────────────────────────────────────
+# Colon-separated list of directories whose FILES older than
+# JANITOR_AGED_LOG_DAYS (default 7) are deleted recursively. Unlike
+# extra_cleanup (which removes whole directories), this only deletes
+# stale files and leaves the directory structure intact — useful for
+# rolling log directories. Opt-in.
+#
+#   JANITOR_AGED_LOG_DIRS="$HOME/.copilot/logs:$HOME/.cache/myapp/logs"
+#   JANITOR_AGED_LOG_DAYS=7
 
 # ── Safety-floor dirs ─────────────────────────────────────────────────
 # Colon-separated list of directories whose inode AND total byte size

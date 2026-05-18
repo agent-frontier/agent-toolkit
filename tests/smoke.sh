@@ -60,6 +60,7 @@ required_sections=(
   tmp_gobuild_orphans
   workspace_binobj
   extra_cleanup
+  aged_logs
   nuget_http_temp
   safety_integrity
   run_end
@@ -87,7 +88,8 @@ for i, l in enumerate(sys.stdin, 1):
 pass "every JSONL line is valid JSON"
 
 # Action sections must report status=dry_run, not ok (the contract for --dry-run).
-for s in docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup nuget_http_temp; do
+# Action sections must report status=dry_run, not ok (the contract for --dry-run).
+for s in docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp; do
   grep -q "\"section\":\"${s}\",\"status\":\"dry_run\"" "$JSONL" \
     || fail "section '${s}' did not report status=dry_run"
 done
@@ -183,7 +185,7 @@ pass "--report exited 0"
 
 grep -q "system-janitor — report" "$REPORT_OUT" || fail "--report missing header"
 grep -q "log dir : ${LOG_DIR}" "$REPORT_OUT"    || fail "--report missing log dir line"
-for s in docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup nuget_http_temp; do
+for s in docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp; do
   grep -q "$s" "$REPORT_OUT" || fail "--report output missing section '$s'"
 done
 pass "--report output mentions all sections"
@@ -1062,11 +1064,16 @@ caps = obj["capabilities"]
 assert isinstance(caps, list) and caps, "capabilities must be non-empty array"
 for c in caps:
     assert isinstance(c, str), f"capability not string: {c!r}"
-for required in ("report", "health"):
+for required in ("report", "health", "toolkit-manifest"):
     assert required in caps, f"capabilities must contain {required!r}, got {caps!r}"
+toolkit = obj.get("toolkit")
+assert isinstance(toolkit, dict), f"toolkit must be object, got {toolkit!r}"
+assert toolkit.get("name") == "agent-toolkit", toolkit
+assert toolkit.get("repo") == "https://github.com/agent-frontier/agent-toolkit", toolkit
+assert toolkit.get("tools") == ["system-janitor", "system-updater"], toolkit
 PY
 rm -rf "$VERSION_W2"
-pass "case 2: --version --json is valid JSON with name/version/capabilities[]"
+pass "case 2: --version --json is valid JSON with name/version/capabilities[]/toolkit"
 
 # Case 3: --version works without a log dir (no JANITOR_LOG_DIR, fresh tmpdir).
 # Confirms the short-circuit runs BEFORE mkdir/flock/log redirect.
@@ -1450,6 +1457,10 @@ except Exception:
 ")
 
 EXPECTED=(
+  aged-logs
+  doctor
+  doctor-json
+  extra-cleanup-globs
   health
   health-acknowledge
   health-json
@@ -1460,6 +1471,7 @@ EXPECTED=(
   report
   report-json
   schema-aliases
+  toolkit-manifest
   version
   version-json
 )
@@ -1586,6 +1598,23 @@ streaks = {s.get('section') for s in d.get('idle_streaks', []) if isinstance(s, 
 assert 'copilot_integrity' not in streaks, f'alias leaked into idle_streaks: {streaks}'
 " || probe_fail "$cap" "alias was not remapped (copilot_integrity still present)"
       ;;
+    toolkit-manifest)
+      set +e; "$SCRIPT" --version --json > "${CAP_WORK}/p_toolkit.json" 2>/dev/null; rc=$?; set -e
+      [ "$rc" -eq 0 ] || probe_fail "$cap" "exit $rc"
+      python3 - "${CAP_WORK}/p_toolkit.json" <<'PY' || probe_fail "$cap" "toolkit object missing or malformed"
+import json, sys
+obj = json.load(open(sys.argv[1]))
+toolkit = obj.get("toolkit")
+assert isinstance(toolkit, dict), toolkit
+assert toolkit.get("name") == "agent-toolkit", toolkit
+repo = toolkit.get("repo")
+assert isinstance(repo, str) and repo.startswith("https://github.com/"), repo
+tools = toolkit.get("tools")
+assert isinstance(tools, list) and tools, tools
+assert tools == ["system-janitor", "system-updater"], tools
+assert "system-janitor" in tools, tools
+PY
+      ;;
     version)
       set +e; out=$("$SCRIPT" --version 2>&1); rc=$?; set -e
       [ "$rc" -eq 0 ] || probe_fail "$cap" "exit $rc"
@@ -1633,6 +1662,65 @@ import json
 d=json.load(open('${CAP_WORK}/report.json'))
 assert 'total_freed_bytes' in d, d
 " || probe_fail "$cap" "--report --json missing total_freed_bytes"
+      ;;
+    extra-cleanup-globs)
+      W="${CAP_WORK}/p_globs"; mkdir -p "$W/state" "$W/target-foo" "$W/target-bar" "$W/keep"
+      CFG="${W}/cfg"
+      cat > "$CFG" <<EOF
+JANITOR_DOCKER_PRUNE=no
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_NUGET_CLEAN=no
+JANITOR_EXTRA_CLEANUP_DIRS="${W}/target-*"
+EOF
+      set +e; JANITOR_LOG_DIR="${W}/state" "$SCRIPT" --config "$CFG" --only extra_cleanup > "${W}/out" 2>&1; rc=$?; set -e
+      [ "$rc" -eq 0 ] || { cat "${W}/out"; probe_fail "$cap" "run exit $rc"; }
+      [ ! -d "${W}/target-foo" ] && [ ! -d "${W}/target-bar" ] && [ -d "${W}/keep" ] \
+        || probe_fail "$cap" "glob expansion didn't remove target-foo+target-bar (or removed wrong dir)"
+      ;;
+    aged-logs)
+      W="${CAP_WORK}/p_aged"; mkdir -p "$W/state" "$W/logs"
+      # Make an old file (10 days old) and a fresh file.
+      touch -d '10 days ago' "${W}/logs/old.log"
+      touch                  "${W}/logs/new.log"
+      CFG="${W}/cfg"
+      cat > "$CFG" <<EOF
+JANITOR_DOCKER_PRUNE=no
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_NUGET_CLEAN=no
+JANITOR_AGED_LOG_DIRS="${W}/logs"
+JANITOR_AGED_LOG_DAYS=7
+EOF
+      set +e; JANITOR_LOG_DIR="${W}/state" "$SCRIPT" --config "$CFG" --only aged_logs > "${W}/out" 2>&1; rc=$?; set -e
+      [ "$rc" -eq 0 ] || { cat "${W}/out"; probe_fail "$cap" "run exit $rc"; }
+      [ ! -f "${W}/logs/old.log" ] && [ -f "${W}/logs/new.log" ] \
+        || probe_fail "$cap" "aged_logs did not prune old.log while keeping new.log"
+      ;;
+    doctor)
+      W="${CAP_WORK}/p_doctor"; mkdir -p "$W"
+      set +e; "$SCRIPT" --doctor > "${W}/out" 2>&1; rc=$?; set -e
+      case "$rc" in 0|4) : ;; *) probe_fail "$cap" "exit $rc not in {0,4}";; esac
+      for name in script_path_resolves cron_entry_present config_parses configured_dirs_exist; do
+        grep -q "$name" "${W}/out" || probe_fail "$cap" "text output missing $name"
+      done
+      ;;
+    doctor-json)
+      W="${CAP_WORK}/p_doctor_json"; mkdir -p "$W"
+      set +e; "$SCRIPT" --doctor --json > "${W}/out.json" 2>/dev/null; rc=$?; set -e
+      case "$rc" in 0|4|5) : ;; *) probe_fail "$cap" "exit $rc not in {0,4,5}";; esac
+      python3 - "${W}/out.json" <<'PY' || probe_fail "$cap" "JSON missing documented shape"
+import json, sys
+obj = json.load(open(sys.argv[1]))
+assert isinstance(obj, dict), obj
+for key in ("status", "exit_code", "generated_at", "script_path", "checks"):
+    assert key in obj, (key, obj)
+checks = obj["checks"]
+assert isinstance(checks, list), checks
+names = {c.get("name") for c in checks if isinstance(c, dict)}
+expected = {"script_path_resolves", "cron_entry_present", "config_parses", "configured_dirs_exist"}
+assert expected <= names, (expected, names)
+PY
       ;;
     *)
       fail "capability completeness: unknown capability '$cap' claimed — add a probe for it in tests/smoke.sh"

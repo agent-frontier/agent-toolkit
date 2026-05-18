@@ -141,12 +141,18 @@ Capability discovery surface. Read-only; requires no state.
     "apt-backend", "exclude", "force", "health", "health-acknowledge",
     "health-json", "holds", "maintenance-window", "only",
     "report", "report-json", "security-only", "stub-backend",
-    "version", "version-json"
-  ]
+    "toolkit-manifest", "version", "version-json"
+  ],
+  "toolkit": {
+    "name": "agent-toolkit",
+    "repo": "https://github.com/agent-frontier/agent-toolkit",
+    "tools": ["system-janitor", "system-updater"]
+  }
 }
 ```
 
-`capabilities[]` is alphabetically sorted and append-only. See
+`capabilities[]` is alphabetically sorted and append-only. `toolkit`
+advertises the rest of the toolkit family in the same payload. See
 [contracts.md](./contracts.md#capability-contract).
 
 Mapping (capability string → feature):
@@ -166,6 +172,7 @@ Mapping (capability string → feature):
 | `report` | `--report` (text) |
 | `report-json` | `--report --json` |
 | `security-only` | `UPDATER_SECURITY_ONLY=yes` (`filtered_non_security` status) |
+| `toolkit-manifest` | top-level `toolkit` object in `--version --json` advertises the toolkit name, repo, and sibling tools |
 | `version` | `--version` (text) |
 | `version-json` | `--version --json` |
 

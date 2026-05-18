@@ -25,6 +25,9 @@ set -uo pipefail
 # do_version() below is the authoritative feature-detection surface for
 # autonomous agents — they should query `--version --json`.
 readonly VERSION="0.1.0"
+readonly TOOLKIT_NAME="agent-toolkit"
+readonly TOOLKIT_REPO="https://github.com/agent-frontier/agent-toolkit"
+readonly -a TOOLKIT_TOOLS=(system-janitor system-updater)
 # ── end Version ────────────────────────────────────────────────────────
 
 # ── Default cron-safe environment ──────────────────────────────────────
@@ -526,11 +529,19 @@ fi
 # ── --version flag ─────────────────────────────────────────────────────
 do_version() {
   if [ "$REPORT_JSON" = 1 ]; then
-    python3 - <<PY
+    local toolkit_tools_nl
+    toolkit_tools_nl="$(printf '%s\n' "${TOOLKIT_TOOLS[@]}")"
+    VERSION_ENV="$VERSION" \
+    TOOLKIT_NAME_ENV="$TOOLKIT_NAME" \
+    TOOLKIT_REPO_ENV="$TOOLKIT_REPO" \
+    TOOLKIT_TOOLS_ENV="$toolkit_tools_nl" \
+    python3 - <<'PY'
 import json
+import os
+
 print(json.dumps({
     "name": "system-updater",
-    "version": "${VERSION}",
+    "version": os.environ["VERSION_ENV"],
     "capabilities": sorted([
         "apt-backend",
         "exclude",
@@ -545,9 +556,18 @@ print(json.dumps({
         "report-json",
         "security-only",
         "stub-backend",
+        "toolkit-manifest",
         "version",
         "version-json",
     ]),
+    "toolkit": {
+        "name": os.environ["TOOLKIT_NAME_ENV"],
+        "repo": os.environ["TOOLKIT_REPO_ENV"],
+        "tools": [
+            tool for tool in os.environ["TOOLKIT_TOOLS_ENV"].splitlines()
+            if tool
+        ],
+    },
 }, indent=2))
 PY
   else

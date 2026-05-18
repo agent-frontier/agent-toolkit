@@ -9,3 +9,8 @@
 last-run.json
 janitor-state/
 state/
+mcp-server/build/
+mcp-server/dist/
+mcp-server/.pytest_cache/
+mcp-server/src/*.egg-info/
+mcp-server/**/__pycache__/

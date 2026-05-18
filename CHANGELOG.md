@@ -14,6 +14,54 @@ codes, status enums, capability strings) over human-facing UX.
 
 ### Added
 
+- `scripts/bootstrap.sh` — curl|bash-friendly bootstrap installer that
+  clones or updates `agent-toolkit`, checks out a requested ref, then
+  execs `./install.sh` with any remaining args.
+- `tests/bootstrap-smoke.sh` — smoke coverage for the bootstrap
+  installer (`bash -n`, `--help`, root refusal, optional live clone).
+- `mcp-server/` — Model Context Protocol server (Python, stdio
+  transport) exposing 9 tools across system-janitor and system-updater
+  (`*_report`, `*_health`, `*_version`, `janitor_doctor`,
+  `*_run` with safe-by-default dry-run). Integrates with Claude
+  Desktop, Cursor, Continue, Cline. Installs via
+  `pip install -e mcp-server/`; smoke harness in
+  `mcp-server/tests/`.
+- `docs/promotion-roadmap.md` — explicit status track for
+  visibility/discoverability work (separate from the tools catalog in
+  `docs/agents/toolkit-roadmap.md`).
+- `docs/comparison.md` — honest positioning vs cron+shell scripts,
+  Ansible/Salt/Puppet, distro-native updaters, logrotate, cross-OS
+  tools, and "build your own MCP server".
+- `docs/cookbook.md` — 6 copy-pasteable fleet-ops recipes
+  (Prometheus exporter, Ansible playbook, Slack notifier,
+  jq forensics, manifest reader, Claude Desktop MCP integration).
+- `docs/releasing.md` — release runbook covering pre-flight,
+  cutting, rollback, versioning policy, and SHA verification flow.
+- `.github/workflows/release.yml` — tag-push release workflow:
+  re-runs smoke, verifies tag matches `VERSION` in both bash tools,
+  builds source tarball + `SHA256SUMS`, extracts release notes from
+  CHANGELOG, prepends a bootstrap-SHA verification block, publishes
+  via `softprops/action-gh-release@v2`.
+- `mcp-server/RELEASING.md` — manual PyPI publish runbook (build,
+  twine check, TestPyPI staging, production upload, trusted-publishing
+  future state).
+- `mcp-server/pyproject.toml` — full PyPI metadata: classifiers,
+  keywords, `[project.urls]`, license, Python version matrix.
+- `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md` (Contributor Covenant 2.1),
+  `SECURITY.md`, `.github/ISSUE_TEMPLATE/{bug,feature,agent-issue}.md`,
+  `.github/ISSUE_TEMPLATE/config.yml`,
+  `.github/PULL_REQUEST_TEMPLATE.md` — standard OSS meta files,
+  contract-aware (PR template encodes the 3-part capability rule and
+  5-place sync rule).
+- `skills/` — 5 agent-skill playbooks (Claude Skills format) plus
+  index: `using-agent-toolkit`, `extending-the-toolkit`,
+  `incident-response`, `cutting-a-release`, `fleet-audit`.
+- `README.md` — production-grade hook, badge row, "What it does"
+  section, "Sample output" section with real `--doctor`,
+  `--report --json`, and `--version --json` captures, expanded
+  "Integrations" section linking to `mcp-server/`. GitHub topics
+  recorded as an HTML comment for maintainer reference.
+
 - `docs/agents/capabilities.md` — project-wide capability registry.
   Single source of truth for every `--version --json` `capabilities[]`
   string across tools, with a machine-readable JSON block, prose
@@ -26,6 +74,12 @@ codes, status enums, capability strings) over human-facing UX.
   each tool's runtime `capabilities[]` matches its registry array
   exactly, and that every shared capability has a documented row in
   the registry's "Shared capabilities" table. Wired into CI.
+
+### Changed
+
+- `README.md` Quick install now leads with the inspectable curl|bash
+  bootstrap one-liner, keeps the git-clone path for curl-averse users,
+  and documents release-tag pinning plus post-install verification.
 
 ### Removed
 
@@ -56,7 +110,7 @@ codes, status enums, capability strings) over human-facing UX.
   - README reframed as project front door (lists both tools as peers,
     points to [`docs/agents/toolkit-roadmap.md`](docs/agents/toolkit-roadmap.md)
     for the candidate menu).
-  - `.github/copilot-instructions.md` reframed as project-level brief
+  - `AGENTS.md` reframed as project-level brief
     with the janitor-script-specific design notes as the depth section.
 
 ### Added
@@ -169,9 +223,9 @@ end-to-end probe.
   string in `capabilities[]` has an end-to-end probe.
 - [`.github/workflows/ci.yml`](.github/workflows/ci.yml) running
   `bash -n`, `shellcheck`, and the smoke suite on every push and PR.
-- [`.github/copilot-instructions.md`](.github/copilot-instructions.md)
-  agent guide documenting design conventions, the capability contract,
-  and the rules for adding new agent-visible affordances.
+- [`AGENTS.md`](AGENTS.md) agent guide documenting design conventions,
+  the capability contract, and the rules for adding new agent-visible
+  affordances.
 
 ### Changed
 

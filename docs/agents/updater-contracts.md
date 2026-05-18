@@ -59,7 +59,7 @@ agents must not assume any overlap.
   "apt-backend", "exclude", "force", "health", "health-acknowledge",
   "health-json", "holds", "maintenance-window", "only",
   "report", "report-json", "security-only", "stub-backend",
-  "version", "version-json"
+  "toolkit-manifest", "version", "version-json"
 ]
 ```
 

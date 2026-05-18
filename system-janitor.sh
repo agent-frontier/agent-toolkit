@@ -22,8 +22,8 @@
 #   1  another instance running (lock held)
 #   2  integrity violation (a configured safety-floor dir was disturbed)
 #   3  precondition failed (e.g., HOME unset, config syntax error)
-#   4  --health: degraded (log dir exists but one or more checks failed)
-#   5  --health: unknown (log dir missing — system-janitor has never run here)
+#   4  --health/--doctor: degraded (one or more checks failed)
+#   5  --health/--doctor: unknown (foundational check missing; no signal yet)
 
 set -uo pipefail
 
@@ -34,6 +34,9 @@ set -uo pipefail
 # autonomous agents — they should query `--version --json` and check
 # `capabilities` rather than parsing `--help`.
 readonly VERSION="0.1.0"
+readonly TOOLKIT_NAME="agent-toolkit"
+readonly TOOLKIT_REPO="https://github.com/agent-frontier/agent-toolkit"
+readonly -a TOOLKIT_TOOLS=(system-janitor system-updater)
 # ── end Version ────────────────────────────────────────────────────────
 
 # ── Default cron-safe environment ──────────────────────────────────────
@@ -55,6 +58,9 @@ REPORT_JSON=0
 # ── --health flag ──────────────────────────────────────────────────────
 DO_HEALTH=0
 # ── end --health flag ──────────────────────────────────────────────────
+# ── --doctor flag ──────────────────────────────────────────────────────
+DO_DOCTOR=0
+# ── end --doctor flag ──────────────────────────────────────────────────
 # ── --health-acknowledge flag ──────────────────────────────────────────
 # Records a byte offset into $JANITOR_LOG_DIR/janitor.jsonl so that
 # subsequent --health probes ignore any malformed lines that already
@@ -83,6 +89,9 @@ while [ $# -gt 0 ]; do
     # ── --health flag ──
     --health)     DO_HEALTH=1; shift ;;
     # ── end --health flag ──
+    # ── --doctor flag ──
+    --doctor)     DO_DOCTOR=1; shift ;;
+    # ── end --doctor flag ──
     # ── --health-acknowledge flag ──
     --health-acknowledge) DO_HEALTH_ACK=1; shift ;;
     # ── end --health-acknowledge flag ──
@@ -114,7 +123,7 @@ done
 # KNOWN_SECTIONS is the source of truth for both --only validation AND the
 # order of execution (the run_section dispatch lines below MUST iterate or
 # match this order). When adding a new action section, add it here.
-KNOWN_SECTIONS=(docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup nuget_http_temp)
+KNOWN_SECTIONS=(docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp)
 
 # Validate --only BEFORE flock / log redirect: invalid input is a precondition
 # failure (exit 3) and the error message belongs on the user's stderr, not
@@ -156,11 +165,12 @@ _should_run_section() {
 }
 # ── end --only flag ────────────────────────────────────────────────────
 
-# --json is only meaningful as a modifier on --report or --health. Reject it
-# standalone with exit 3 (precondition failure) so agents fail fast rather
-# than silently getting a human-formatted run.
-if [ "$REPORT_JSON" = 1 ] && [ "$DO_REPORT" != 1 ] && [ "$DO_HEALTH" != 1 ] && [ "$DO_VERSION" != 1 ] && [ "$DO_HEALTH_ACK" != 1 ]; then
-  echo "[ERROR] --json requires --report, --health, --health-acknowledge, or --version" >&2
+# --json is only meaningful as a modifier on --report / --health / --doctor
+# style read-only probes. Reject it standalone with exit 3 (precondition
+# failure) so agents fail fast rather than silently getting a human-formatted
+# run.
+if [ "$REPORT_JSON" = 1 ] && [ "$DO_REPORT" != 1 ] && [ "$DO_HEALTH" != 1 ] && [ "$DO_DOCTOR" != 1 ] && [ "$DO_VERSION" != 1 ] && [ "$DO_HEALTH_ACK" != 1 ]; then
+  echo "[ERROR] --json requires --report, --health, --doctor, --health-acknowledge, or --version" >&2
   exit 3
 fi
 
@@ -171,7 +181,7 @@ system-janitor — disk-cleanup sweep with audit-grade logging.
 USAGE:
   system-janitor [--config <path>] [--dry-run] [--only <list>]
                  [--report [--json]] [--health [--json]]
-                 [--health-acknowledge [--json]]
+                 [--doctor [--json]] [--health-acknowledge [--json]]
                  [--version [--json]] [--help]
 
 FLAGS:
@@ -210,6 +220,17 @@ FLAGS:
                       5  unknown (log dir missing — never run here)
                     See EXIT CODES below. Pair with --json for a
                     machine-readable probe response.
+  --doctor          Probe janitor's self-wiring: script path resolution,
+                    cron wiring, config syntax, and configured path
+                    existence. Read-only: does not acquire the lock,
+                    does not create the log dir, does not write any
+                    state. Exit codes:
+                      0  healthy (all checks pass)
+                      4  degraded (one or more checks failed)
+                      5  unknown (script path does not resolve)
+                    Pair with --json for a machine-readable response
+                    with keys status, exit_code, generated_at,
+                    script_path, checks[].
   --health-acknowledge
                     Record the current size of janitor.jsonl as a
                     baseline so future --health probes ignore any
@@ -231,6 +252,8 @@ FLAGS:
                     human table. With --health, emit the probe response
                     as JSON (no ANSI, no Unicode glyphs) with keys
                     status, exit_code, generated_at, log_dir, checks[].
+                    With --doctor, emit a JSON object with keys status,
+                    exit_code, generated_at, script_path, checks[].
                     With --health-acknowledge, emit a JSON object with
                     keys acknowledged, baseline_bytes, excluded_events.
                     With --version, emit a JSON object with keys name,
@@ -238,7 +261,7 @@ FLAGS:
                     agents can feature-detect before invoking.
                     Schemas are documented in the README. Errors out
                     (exit 3) if used without --report, --health,
-                    --health-acknowledge, or --version.
+                    --doctor, --health-acknowledge, or --version.
   --version         Print the script version and exit 0. Read-only:
                     does not acquire the lock, does not create the log
                     dir, does not require HOME or any state. Pair with
@@ -249,7 +272,16 @@ FLAGS:
 CONFIG (sourced as bash):
   JANITOR_WORKSPACE_DIRS         colon-separated dirs scanned for bin/obj
                                  (e.g., $HOME/sandbox:$HOME/projects)
-  JANITOR_EXTRA_CLEANUP_DIRS     colon-separated dirs to remove entirely
+  JANITOR_EXTRA_CLEANUP_DIRS     colon-separated dirs to remove entirely.
+                                 Items containing glob metacharacters
+                                 (* ? [) are expanded at runtime so
+                                 patterns like /tmp/build-*-target are
+                                 supported. Literal paths still work.
+  JANITOR_AGED_LOG_DIRS          colon-separated dirs whose files older
+                                 than JANITOR_AGED_LOG_DAYS are pruned
+                                 (recursive; files only, not dirs).
+  JANITOR_AGED_LOG_DAYS          age threshold in days for aged_logs
+                                 (default: 7)
   JANITOR_SAFETY_FLOOR_DIRS      colon-separated dirs whose inode+size
                                  must NOT change during the run
   JANITOR_DOCKER_PRUNE           yes/no (default: yes if docker present)
@@ -283,6 +315,10 @@ EXAMPLES:
   system-janitor --health-acknowledge      # baseline current EOF
   system-janitor --health                  # → healthy  (exit 0)
 
+  # Verify installation wiring and config reachability:
+  system-janitor --doctor
+  system-janitor --doctor --json
+
 LOGS:
   $JANITOR_LOG_DIR/janitor.log       human-readable
   $JANITOR_LOG_DIR/janitor.jsonl     one JSON event per section (append-only)
@@ -305,19 +341,15 @@ STATUS ENUM (janitor.jsonl "status" field):
   violated_inode_changed   a safety-floor dir's inode changed during the run
 
 EXIT CODES:
-  0   success (default run or --health healthy)
+  0   success (default run, --health healthy, or --doctor healthy)
   1   another instance running (lock held)
   2   integrity violation (a configured safety-floor dir was disturbed)
   3   precondition failed (e.g., HOME unset, config syntax error, or
-      --json used without --report, --health, --health-acknowledge,
-      or --version)
-  4   --health: degraded (log dir exists, but one or more downstream
-      checks failed — JSONL malformed, integrity violated, idle streak,
-      etc.). The tool itself is usable; trust the audit trail
-      conditionally.
-  5   --health: unknown (log dir missing or last-run.json absent —
-      system-janitor has never run on this host). Not a failure;
-      just no signal yet.
+      --json used without --report, --health, --doctor,
+      --health-acknowledge, or --version)
+  4   --health/--doctor: degraded (one or more checks failed)
+  5   --health/--doctor: unknown (foundational check missing; no
+      trustworthy signal yet)
 
 See https://github.com/agent-frontier/agent-toolkit for full docs.
 USAGE
@@ -326,8 +358,16 @@ fi
 
 # ── Load configuration ────────────────────────────────────────────────
 load_config() {
-  local f="${CONFIG_FILE:-$DEFAULT_CONFIG}"
+  local f="${CONFIG_FILE:-$DEFAULT_CONFIG}" err
+  CONFIG_PARSE_ERROR=""
   if [ -f "$f" ]; then
+    if [ "${DO_DOCTOR:-0}" = 1 ]; then
+      err="$(bash -n "$f" 2>&1)" || {
+        CONFIG_LOADED="$f"
+        CONFIG_PARSE_ERROR="$err"
+        return 0
+      }
+    fi
     # shellcheck disable=SC1090
     if ! source "$f"; then
       echo "[FATAL] config file invalid: $f" >&2
@@ -343,6 +383,8 @@ load_config
 # Apply defaults (config values win over these).
 JANITOR_WORKSPACE_DIRS="${JANITOR_WORKSPACE_DIRS:-}"
 JANITOR_EXTRA_CLEANUP_DIRS="${JANITOR_EXTRA_CLEANUP_DIRS:-}"
+JANITOR_AGED_LOG_DIRS="${JANITOR_AGED_LOG_DIRS:-}"
+JANITOR_AGED_LOG_DAYS="${JANITOR_AGED_LOG_DAYS:-7}"
 JANITOR_SAFETY_FLOOR_DIRS="${JANITOR_SAFETY_FLOOR_DIRS:-}"
 JANITOR_DOCKER_PRUNE="${JANITOR_DOCKER_PRUNE:-yes}"
 JANITOR_DOCKER_VOLUMES="${JANITOR_DOCKER_VOLUMES:-yes}"
@@ -359,8 +401,9 @@ JANITOR_LOG_DIR="${JANITOR_LOG_DIR:-${XDG_STATE_HOME}/janitor}"
 #
 # These live above do_report() (which consumes them) but are conceptually
 # part of the section-dispatch contract below — when renaming a section,
+# .github/copilot-instructions.md is now a pointer to ../AGENTS.md.
 # update both this map AND the run_section line, and document the change in
-# .github/copilot-instructions.md ("Schema history & section aliases").
+# AGENTS.md ("Schema history & section aliases").
 declare -A SECTION_ALIASES=(
   ["copilot_integrity"]="safety_integrity"
 )
@@ -810,17 +853,29 @@ fi
 # test locks this in) so the JSON output is stable across runs.
 do_version() {
   if [ "$REPORT_JSON" = 1 ]; then
-    python3 - <<PY
+    local toolkit_tools_nl
+    toolkit_tools_nl="$(printf '%s\n' "${TOOLKIT_TOOLS[@]}")"
+    VERSION_ENV="$VERSION" \
+    TOOLKIT_NAME_ENV="$TOOLKIT_NAME" \
+    TOOLKIT_REPO_ENV="$TOOLKIT_REPO" \
+    TOOLKIT_TOOLS_ENV="$toolkit_tools_nl" \
+    python3 - <<'PY'
 import json
+import os
+
 print(json.dumps({
     "name": "system-janitor",
-    "version": "${VERSION}",
+    "version": os.environ["VERSION_ENV"],
     # NOTE: when adding a new agent-visible feature (new flag, new
     # output field, new JSONL status, new schema file, …) you MUST add a
     # string here AND add a probe in the "capability completeness" stage
     # of tests/smoke.sh. The smoke stage proves every claimed capability
     # actually works; this list is what agents feature-detect against.
     "capabilities": sorted([
+        "aged-logs",
+        "doctor",
+        "doctor-json",
+        "extra-cleanup-globs",
         "health",
         "health-acknowledge",
         "health-json",
@@ -832,9 +887,18 @@ print(json.dumps({
         "report-bytes",
         "report-json",
         "schema-aliases",
+        "toolkit-manifest",
         "version",
         "version-json",
     ]),
+    "toolkit": {
+        "name": os.environ["TOOLKIT_NAME_ENV"],
+        "repo": os.environ["TOOLKIT_REPO_ENV"],
+        "tools": [
+            tool for tool in os.environ["TOOLKIT_TOOLS_ENV"].splitlines()
+            if tool
+        ],
+    },
 }, indent=2))
 PY
   else
@@ -1206,6 +1270,202 @@ if [ "$DO_HEALTH" = 1 ]; then
 fi
 # ── end --health flag ──────────────────────────────────────────────────
 
+# ── --doctor flag ──────────────────────────────────────────────────────
+# Read-only self-diagnosis probe. Like --report / --health / --version, this
+# runs BEFORE flock, BEFORE mkdir of LOG_DIR, and BEFORE the exec >>"$LOG"
+# redirect. It must not create or write to anything. Exit codes:
+#   0  healthy   — all checks pass
+#   4  degraded  — one or more checks failed
+#   5  unknown   — script path does not resolve to an existing file
+do_doctor() {
+  local mode="text"
+  [ "$REPORT_JSON" = 1 ] && mode="json"
+  local config_path="${CONFIG_FILE:-$DEFAULT_CONFIG}"
+
+  DOCTOR_MODE="$mode" \
+    DOCTOR_ARGV0="$0" \
+    DOCTOR_CONFIG_PATH="$config_path" \
+    DOCTOR_CONFIG_PARSE_ERROR="${CONFIG_PARSE_ERROR:-}" \
+    DOCTOR_WORKSPACE_DIRS="${JANITOR_WORKSPACE_DIRS:-}" \
+    DOCTOR_EXTRA_CLEANUP_DIRS="${JANITOR_EXTRA_CLEANUP_DIRS:-}" \
+    DOCTOR_AGED_LOG_DIRS="${JANITOR_AGED_LOG_DIRS:-}" \
+    DOCTOR_SAFETY_FLOOR_DIRS="${JANITOR_SAFETY_FLOOR_DIRS:-}" \
+    python3 - <<'PY'
+import datetime, glob, json, os, shlex, subprocess, sys
+
+mode = os.environ["DOCTOR_MODE"]
+argv0 = os.environ["DOCTOR_ARGV0"]
+config_path = os.environ["DOCTOR_CONFIG_PATH"]
+config_parse_error = os.environ.get("DOCTOR_CONFIG_PARSE_ERROR", "")
+generated_at = datetime.datetime.now().astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+
+def norm_detail(msg):
+    if msg is None:
+        return None
+    lines = [line.strip() for line in str(msg).splitlines() if line.strip()]
+    return " | ".join(lines) if lines else ""
+
+def add(name, ok, detail):
+    checks.append({"name": name, "ok": bool(ok), "detail": norm_detail(detail)})
+
+def split_paths(raw):
+    if not raw:
+        return []
+    out = []
+    for item in raw.split(":"):
+        if not item:
+            continue
+        out.append(os.path.expandvars(os.path.expanduser(item)))
+    return out
+
+def check_existing_entries(var_name, raw, allow_glob=False):
+    if not raw:
+        return True, f"{var_name} unset"
+    offending = []
+    glob_no_match = []
+    checked = []
+    for item in split_paths(raw):
+        checked.append(item)
+        if allow_glob and any(ch in item for ch in "*?["):
+            matches = glob.glob(item)
+            if matches or os.path.exists(item):
+                continue
+            # Glob with no current matches is informational, not a failure:
+            # the pattern is well-formed; there's just nothing to clean
+            # right now (the common steady state).
+            glob_no_match.append(item)
+        elif not os.path.exists(item):
+            offending.append(item)
+    if offending:
+        return False, f"missing targets: {', '.join(offending)}"
+    if glob_no_match:
+        return True, f"{var_name}: {len(checked)} entries resolved ({len(glob_no_match)} glob(s) with no current matches: {', '.join(glob_no_match)})"
+    return True, f"{var_name}: {len(checked)} entr{'y' if len(checked)==1 else 'ies'} resolved"
+
+checks = []
+script_path = None
+try:
+    resolved = subprocess.run(["readlink", "-f", argv0], capture_output=True, text=True, check=False)
+    candidate = resolved.stdout.strip()
+except OSError as e:
+    candidate = ""
+    resolved = None
+if candidate and os.path.isfile(candidate):
+    script_path = candidate
+    add("script_path_resolves", True, candidate)
+else:
+    detail = candidate or (resolved.stderr.strip() if resolved and resolved.stderr else f"could not resolve {argv0}")
+    add("script_path_resolves", False, detail)
+
+if script_path is None:
+    add("cron_entry_present", False, "skipped: script_path_resolves failed")
+else:
+    import shutil as _shutil
+    crontab_path = _shutil.which("crontab")
+    if crontab_path is None:
+        add("cron_entry_present", True, "crontab not installed (skip)")
+    else:
+        proc = subprocess.run([crontab_path, "-l"], capture_output=True, text=True, check=False)
+        lines = proc.stdout.splitlines() if proc.stdout else []
+        found = False
+        matched_line = None
+        for raw in lines:
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if script_path and line.endswith(script_path):
+                found = True
+                matched_line = line
+                break
+            try:
+                tokens = shlex.split(line)
+            except ValueError:
+                tokens = line.split()
+            if not tokens:
+                continue
+            tail = tokens[-1]
+            if tail == script_path:
+                found = True
+                matched_line = line
+                break
+            try:
+                tail_resolved = subprocess.run(["readlink", "-f", tail], capture_output=True, text=True, check=False).stdout.strip()
+            except OSError:
+                tail_resolved = ""
+            if tail_resolved and tail_resolved == script_path:
+                found = True
+                matched_line = line
+                break
+        if found:
+            add("cron_entry_present", True, matched_line)
+        else:
+            add("cron_entry_present", False, "no crontab entry references this script")
+
+if not config_parse_error:
+    if os.path.isfile(config_path):
+        add("config_parses", True, config_path)
+    else:
+        add("config_parses", True, f"{config_path} absent (ok)")
+else:
+    add("config_parses", False, config_parse_error)
+
+if config_parse_error:
+    add("configured_dirs_exist", True, "skipped: config_parses failed")
+else:
+    results = []
+    failures = []
+    for var_name, raw, allow_glob in [
+        ("JANITOR_WORKSPACE_DIRS", os.environ.get("DOCTOR_WORKSPACE_DIRS", ""), False),
+        ("JANITOR_EXTRA_CLEANUP_DIRS", os.environ.get("DOCTOR_EXTRA_CLEANUP_DIRS", ""), True),
+        ("JANITOR_AGED_LOG_DIRS", os.environ.get("DOCTOR_AGED_LOG_DIRS", ""), False),
+        ("JANITOR_SAFETY_FLOOR_DIRS", os.environ.get("DOCTOR_SAFETY_FLOOR_DIRS", ""), False),
+    ]:
+        ok, detail = check_existing_entries(var_name, raw, allow_glob=allow_glob)
+        results.append(detail)
+        if not ok:
+            failures.append(f"{var_name}: {detail}")
+    if failures:
+        add("configured_dirs_exist", False, "; ".join(failures))
+    else:
+        add("configured_dirs_exist", True, "; ".join(results))
+
+if script_path is None:
+    status = "unknown"
+    exit_code = 5
+elif any(not c["ok"] for c in checks):
+    status = "degraded"
+    exit_code = 4
+else:
+    status = "healthy"
+    exit_code = 0
+
+if mode == "json":
+    sys.stdout.write(json.dumps({
+        "status": status,
+        "exit_code": exit_code,
+        "generated_at": generated_at,
+        "script_path": script_path,
+        "checks": checks,
+    }, indent=2))
+    sys.stdout.write("\n")
+else:
+    print(f"system-janitor doctor: {status} (exit {exit_code})")
+    name_w = max(len(c["name"]) for c in checks)
+    for c in checks:
+        state = "ok" if c["ok"] else "FAIL"
+        detail = c["detail"] or ""
+        print(f"  {state:<4} {c['name']:<{name_w}}  {detail}")
+
+sys.exit(exit_code)
+PY
+}
+
+if [ "$DO_DOCTOR" = 1 ]; then
+  do_doctor
+  exit $?
+fi
+# ── end --doctor flag ──────────────────────────────────────────────────
+
 # ── --health-acknowledge flag ──────────────────────────────────────────
 # Records the current size of janitor.jsonl as a byte-offset baseline in
 # $JANITOR_LOG_DIR/.health-baseline. Future --health probes ignore any
@@ -1370,6 +1630,35 @@ split_paths() {
   done
 }
 
+split_paths_glob() {
+  # Same as split_paths, but items containing glob metacharacters (* ? [)
+  # are expanded against the filesystem (nullglob: no matches -> nothing
+  # emitted). Literal paths pass through unchanged so "[skip] already
+  # absent" diagnostics for typo'd literals are preserved.
+  local raw="$1" item match
+  IFS=':' read -r -a _items <<< "$raw"
+  for item in "${_items[@]}"; do
+    [ -z "$item" ] && continue
+    item="${item/#\~/$HOME}"
+    eval "item=\"$item\""
+    case "$item" in
+      *[\*\?\[]*)
+        # shellcheck disable=SC2086
+        local _saved_nullglob; _saved_nullglob=$(shopt -p nullglob)
+        shopt -s nullglob
+        local _expanded=($item)
+        eval "$_saved_nullglob"
+        for match in "${_expanded[@]}"; do
+          printf '%s\n' "$match"
+        done
+        ;;
+      *)
+        printf '%s\n' "$item"
+        ;;
+    esac
+  done
+}
+
 jsonescape() {
   python3 -c 'import json,sys; print(json.dumps(sys.argv[1]))' "$1" 2>/dev/null \
     || printf '"%s"' "${1//\"/\\\"}"
@@ -1417,7 +1706,7 @@ section() { echo; echo "── $* ── $(ts)"; }
 # go_build_cache, tmp_gobuild_orphans, nuget_http_temp) legitimately have
 # nothing to do on a clean host and stay status="ok"; do not add them here.
 # When introducing a new opt-in section, add its name to this array.
-OPTIN_SECTIONS=("workspace_binobj" "extra_cleanup")
+OPTIN_SECTIONS=("workspace_binobj" "extra_cleanup" "aged_logs")
 
 run_section() {
   local name="$1"; shift
@@ -1532,8 +1821,30 @@ act_extra_cleanup() {
     else
       echo "  [skip] $dir already absent"
     fi
-  done < <(split_paths "$JANITOR_EXTRA_CLEANUP_DIRS")
+  done < <(split_paths_glob "$JANITOR_EXTRA_CLEANUP_DIRS")
   echo "removed $removed path(s)"
+}
+
+act_aged_logs() {
+  [ -n "$JANITOR_AGED_LOG_DIRS" ] || { echo "[skip] JANITOR_AGED_LOG_DIRS not set"; return 0; }
+  local days="${JANITOR_AGED_LOG_DAYS:-7}"
+  # Validate days is a non-negative integer; fall back to 7 on garbage.
+  case "$days" in
+    ''|*[!0-9]*) echo "[warn] invalid JANITOR_AGED_LOG_DAYS='$days', using 7"; days=7 ;;
+  esac
+  local removed=0 dir count
+  while IFS= read -r dir; do
+    [ -d "$dir" ] || { echo "  [skip] $dir not a directory"; continue; }
+    count=$(find "$dir" -type f -mtime "+${days}" 2>/dev/null | wc -l)
+    if [ "$count" -gt 0 ]; then
+      find "$dir" -type f -mtime "+${days}" -delete 2>/dev/null \
+        && { echo "  $dir: removed $count file(s) older than ${days}d"; removed=$((removed+count)); } \
+        || echo "  [warn] partial removal in $dir"
+    else
+      echo "  $dir: nothing older than ${days}d"
+    fi
+  done < <(split_paths "$JANITOR_AGED_LOG_DIRS")
+  echo "removed $removed file(s)"
 }
 
 act_nuget_caches() {
@@ -1556,8 +1867,18 @@ count_workspace_binobj() {
 count_extra_cleanup() {
   [ -n "$JANITOR_EXTRA_CLEANUP_DIRS" ] || { echo ""; return; }
   local args=""
-  while IFS= read -r d; do args="$args \"$d\""; done < <(split_paths "$JANITOR_EXTRA_CLEANUP_DIRS")
+  while IFS= read -r d; do args="$args \"$d\""; done < <(split_paths_glob "$JANITOR_EXTRA_CLEANUP_DIRS")
+  [ -n "$args" ] || { echo ""; return; }
   echo "ls -1d $args 2>/dev/null"
+}
+count_aged_logs() {
+  [ -n "$JANITOR_AGED_LOG_DIRS" ] || { echo ""; return; }
+  local days="${JANITOR_AGED_LOG_DAYS:-7}"
+  case "$days" in ''|*[!0-9]*) days=7 ;; esac
+  local find_dirs=""
+  while IFS= read -r d; do [ -d "$d" ] && find_dirs="$find_dirs \"$d\""; done < <(split_paths "$JANITOR_AGED_LOG_DIRS")
+  [ -n "$find_dirs" ] || { echo ""; return; }
+  echo "find $find_dirs -type f -mtime +${days} 2>/dev/null"
 }
 
 # ── Run header ─────────────────────────────────────────────────────────
@@ -1595,6 +1916,7 @@ run_section "go_build_cache"      ""                            act_go_clean
 run_section "tmp_gobuild_orphans" "$(count_tmp_gobuild)"        act_tmp_gobuild
 run_section "workspace_binobj"    "$(count_workspace_binobj)"   act_workspace_binobj
 run_section "extra_cleanup"       "$(count_extra_cleanup)"      act_extra_cleanup
+run_section "aged_logs"           "$(count_aged_logs)"          act_aged_logs
 run_section "nuget_http_temp"     ""                            act_nuget_caches
 
 # ── Integrity check on safety-floor dirs ──────────────────────────────

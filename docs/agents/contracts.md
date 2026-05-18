@@ -64,15 +64,21 @@ lives at [`capabilities.md`](./capabilities.md): one JSON block
 listing every capability string each tool advertises, plus prose
 tables for shared and per-tool semantics. Agents that operate
 multiple tools should consult the registry to learn which
-capability strings carry identical semantics across tools (eight at
+capability strings carry identical semantics across tools (nine at
 the moment: `health`, `health-acknowledge`, `health-json`, `only`,
-`report`, `report-json`, `version`, `version-json`) and which are
-tool-specific.
+`report`, `report-json`, `toolkit-manifest`, `version`,
+`version-json`) and which are tool-specific.
 
 Per-tool entry points: janitor's array is also documented in
 [`machine-modes.md`](./machine-modes.md#--version), updater's in
 [`updater-machine-modes.md`](./updater-machine-modes.md#--version).
 Those pages and the registry must agree.
+
+Shared capability reference:
+
+| Capability | Meaning |
+|---|---|
+| `toolkit-manifest` | `--version --json` includes a top-level `toolkit` object that advertises the toolkit name, canonical repo URL, and sibling tool names. |
 
 Rules:
 

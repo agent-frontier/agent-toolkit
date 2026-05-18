@@ -1,0 +1,45 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agent-toolkit-mcp"
+version = "0.1.0"
+description = "Model Context Protocol server exposing the agent-toolkit (system-janitor, system-updater) to MCP-aware agent runtimes."
+readme = "README.md"
+license = {text = "Apache-2.0"}
+requires-python = ">=3.10"
+authors = [{name = "agent-frontier"}]
+keywords = ["mcp", "model-context-protocol", "cron", "sysadmin", "agent-tools", "linux", "devops", "autonomous-agents", "cleanup", "apt", "system-administration"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: System Administrators",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: System :: Systems Administration",
+  "Topic :: System :: Monitoring",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = ["mcp>=1.0"]
+
+[project.urls]
+Homepage = "https://github.com/agent-frontier/agent-toolkit"
+Documentation = "https://github.com/agent-frontier/agent-toolkit/blob/main/mcp-server/README.md"
+Issues = "https://github.com/agent-frontier/agent-toolkit/issues"
+Source = "https://github.com/agent-frontier/agent-toolkit/tree/main/mcp-server"
+Changelog = "https://github.com/agent-frontier/agent-toolkit/blob/main/CHANGELOG.md"
+
+[project.scripts]
+agent-toolkit-mcp = "agent_toolkit_mcp.__main__:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

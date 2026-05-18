@@ -16,11 +16,14 @@ Docker-only host without configuration.
 
 ```bash
 git clone https://github.com/agent-frontier/agent-toolkit.git ~/agent-toolkit
-ln -s ~/agent-toolkit/system-janitor.sh ~/.local/bin/system-janitor
-chmod +x ~/agent-toolkit/system-janitor.sh
+cd ~/agent-toolkit
+./install.sh
 ```
 
-Make sure `~/.local/bin` is on your `$PATH`. Verify:
+The installer creates or repairs `~/.local/bin/system-janitor`,
+installs the managed weekly cron entry, and also wires up the sibling
+`system-updater` tool from the same checkout. Make sure `~/.local/bin`
+is on your `$PATH`. Verify:
 
 ```bash
 system-janitor --version
@@ -43,17 +46,19 @@ $EDITOR ~/.config/system-janitor/config
 
 ## Schedule with cron
 
-Add a weekly entry with `crontab -e`:
+`./install.sh` installs the managed weekly entry below automatically and
+repairs stale paths left behind by old checkouts:
 
 ```cron
-# system-janitor — weekly disk cleanup (Sunday 03:17)
+# system-janitor — weekly disk cleanup (managed by agent-toolkit install.sh)
 17 3 * * 0 $HOME/.local/bin/system-janitor
 ```
 
-Pick an odd minute (e.g. `:17`) rather than `:00` to avoid colliding with
-every other cron job on the host. The `flock`-based single-instance lock
-will refuse to start a second run if one is still in progress — see
-[safety.md](./safety.md).
+If you prefer to manage cron manually, use the same comment and command so
+future installer runs can recognize and repair the entry. Pick an odd minute
+(e.g. `:17`) rather than `:00` to avoid colliding with every other cron job
+on the host. The `flock`-based single-instance lock will refuse to start a
+second run if one is still in progress — see [safety.md](./safety.md).
 
 ## Verify it ran
 

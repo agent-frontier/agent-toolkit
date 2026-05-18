@@ -13,6 +13,10 @@ tables below summarize for humans. Both must move together.
 ```json
 {
   "system-janitor": [
+    "aged-logs",
+    "doctor",
+    "doctor-json",
+    "extra-cleanup-globs",
     "health",
     "health-acknowledge",
     "health-json",
@@ -24,6 +28,7 @@ tables below summarize for humans. Both must move together.
     "report-bytes",
     "report-json",
     "schema-aliases",
+    "toolkit-manifest",
     "version",
     "version-json"
   ],
@@ -41,6 +46,7 @@ tables below summarize for humans. Both must move together.
     "report-json",
     "security-only",
     "stub-backend",
+    "toolkit-manifest",
     "version",
     "version-json"
   ]
@@ -54,7 +60,7 @@ corresponding implementation and smoke probe in the same commit.
 
 ## Shared capabilities (identical semantics across tools)
 
-These eight capability strings appear in both tools' arrays and mean
+These nine capability strings appear in both tools' arrays and mean
 the same thing in both. Agents probing `--version --json` can rely on
 identical contracts; any divergence is a bug.
 
@@ -66,8 +72,9 @@ identical contracts; any divergence is a bug.
 | `only` | `--only <list>` filters the run scope (sections for janitor, packages for updater); non-matching items are omitted from JSONL and the report. |
 | `report` | `--report` reads the JSONL audit trail and prints a human-readable summary of prior runs. |
 | `report-json` | `--report --json` emits a machine-readable summary validated by the tool's `schemas/<tool>-report.schema.json`. |
+| `toolkit-manifest` | `--version --json` includes a top-level `toolkit` object with the toolkit name, canonical repo URL, and sibling tool names so agents can discover the rest of the family. |
 | `version` | `--version` prints `<tool-name> <semver>` on stdout; exit `0`. |
-| `version-json` | `--version --json` emits `{name, version, capabilities[]}` where `capabilities[]` is the array this file describes. |
+| `version-json` | `--version --json` emits `{name, version, capabilities[], toolkit}` where `capabilities[]` is the array this file describes. |
 
 ## `system-janitor`-only capabilities
 

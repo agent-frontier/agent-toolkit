@@ -24,7 +24,7 @@ If you are a human looking for prose and onboarding, start at
   `last-run.json` on-disk shape (the data these machine modes summarize).
 - [`../../schemas/`](../../schemas/) — formal Draft 2020-12 JSON Schemas
   for `--report --json` and `--health --json`.
-- [`../../.github/copilot-instructions.md`](../../.github/copilot-instructions.md) —
+- [`../../AGENTS.md`](../../AGENTS.md) —
   design north star and architecture brief for agents working *on* the
   script (not just consuming its output).
 - [`../../CHANGELOG.md`](../../CHANGELOG.md) — per-release record of

@@ -84,12 +84,17 @@ expected = [
     "apt-backend", "exclude", "force", "health", "health-acknowledge",
     "health-json", "holds", "maintenance-window", "only",
     "report", "report-json", "security-only", "stub-backend",
-    "version", "version-json",
+    "toolkit-manifest", "version", "version-json",
 ]
 assert caps == sorted(caps), f"capabilities not sorted alphabetically: {caps}"
 assert caps == expected, f"capabilities mismatch:\n  got:      {caps}\n  expected: {expected}"
+toolkit = d.get("toolkit")
+assert isinstance(toolkit, dict), f"toolkit not an object: {toolkit!r}"
+assert toolkit.get("name") == "agent-toolkit", toolkit
+assert toolkit.get("repo") == "https://github.com/agent-frontier/agent-toolkit", toolkit
+assert toolkit.get("tools") == ["system-janitor", "system-updater"], toolkit
 PY
-pass "--version --json capabilities[] is the exact 15-item v0 set, alphabetical"
+pass "--version --json exposes the exact 16-item capability set plus toolkit manifest"
 
 # ─── 03: --help ─────────────────────────────────────────────────────────────
 section "─── 03: --help ──────────────────────────────────────────────"
@@ -500,8 +505,33 @@ import json
 for c in json.load(open('${CAP_W}/caps.json'))['capabilities']:
     print(c)
 ")
-[ "${#CLAIMED[@]}" -eq 15 ] || fail "expected 15 capabilities, got ${#CLAIMED[@]}"
-pass "capabilities[] has 15 entries"
+EXPECTED=(
+  apt-backend
+  exclude
+  force
+  health
+  health-acknowledge
+  health-json
+  holds
+  maintenance-window
+  only
+  report
+  report-json
+  security-only
+  stub-backend
+  toolkit-manifest
+  version
+  version-json
+)
+[ "${#CLAIMED[@]}" -eq "${#EXPECTED[@]}" ] || fail "expected ${#EXPECTED[@]} capabilities, got ${#CLAIMED[@]}"
+claimed_str=" ${CLAIMED[*]} "
+for cap in "${EXPECTED[@]}"; do
+  case "$claimed_str" in
+    *" $cap "*) : ;;
+    *) fail "capability completeness: expected capability '$cap' missing from --version --json" ;;
+  esac
+done
+pass "capabilities[] has all ${#EXPECTED[@]} expected entries"
 
 probe_fail() { fail "capability '$1' probe failed: $2"; }
 
@@ -616,12 +646,28 @@ PY
       ( unset UPDATER_LOG_DIR; UPDATER_BACKEND=apt "$SCRIPT" --version >/dev/null ) \
         || probe_fail "$cap" "UPDATER_BACKEND=apt --version crashed"
       ;;
+    toolkit-manifest)
+      ( unset UPDATER_LOG_DIR; "$SCRIPT" --version --json > "${P}/v.json" ) || probe_fail "$cap" "exit"
+      python3 - "${P}/v.json" <<'PY' || probe_fail "$cap" "toolkit object missing or malformed"
+import json, sys
+obj = json.load(open(sys.argv[1]))
+toolkit = obj.get("toolkit")
+assert isinstance(toolkit, dict), toolkit
+assert toolkit.get("name") == "agent-toolkit", toolkit
+repo = toolkit.get("repo")
+assert isinstance(repo, str) and repo.startswith("https://github.com/"), repo
+tools = toolkit.get("tools")
+assert isinstance(tools, list) and tools, tools
+assert tools == ["system-janitor", "system-updater"], tools
+assert "system-updater" in tools, tools
+PY
+      ;;
     *)
       fail "capability completeness: unknown capability '$cap' — add a probe in tests/updater-smoke.sh"
       ;;
   esac
 done
-pass "all 15 capabilities probed end-to-end"
+pass "all ${#CLAIMED[@]} capabilities probed end-to-end"
 
 # ─── 15: schema validation (optional) ───────────────────────────────────────
 section "─── 15: schema validation ───────────────────────────────────"

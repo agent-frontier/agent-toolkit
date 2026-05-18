@@ -1,0 +1,167 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  smoke:
+    name: release smoke gate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: bash -n (syntax check)
+        run: bash -n system-janitor.sh system-updater.sh install.sh scripts/bootstrap.sh
+
+      - name: Install shellcheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+
+      - name: shellcheck
+        run: shellcheck -S warning system-janitor.sh system-updater.sh install.sh scripts/bootstrap.sh
+
+      - name: Run janitor smoke test
+        run: ./tests/smoke.sh
+
+      - name: Run updater smoke test
+        run: ./tests/updater-smoke.sh
+
+      - name: Run bootstrap smoke test
+        run: ./tests/bootstrap-smoke.sh
+
+      - name: Run install smoke test
+        run: ./tests/install-smoke.sh
+
+      - name: Run capabilities registry check
+        run: ./tests/capabilities-check.sh
+
+  release:
+    name: publish release
+    runs-on: ubuntu-latest
+    needs: smoke
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify tag version matches scripts
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+
+          extract_version() {
+            local script_path="$1"
+            grep -E '(^VERSION=|^readonly[[:space:]]+VERSION=)' "$script_path" | head -1 | sed -E 's/.*VERSION="([^"]+)".*/\1/'
+          }
+
+          JANITOR_VERSION="$(extract_version system-janitor.sh)"
+          UPDATER_VERSION="$(extract_version system-updater.sh)"
+
+          if [ -z "$JANITOR_VERSION" ]; then
+            echo "::error::failed to extract VERSION from system-janitor.sh"
+            exit 1
+          fi
+
+          if [ -z "$UPDATER_VERSION" ]; then
+            echo "::error::failed to extract VERSION from system-updater.sh"
+            exit 1
+          fi
+
+          if [ "$JANITOR_VERSION" != "$UPDATER_VERSION" ]; then
+            echo "::error::VERSION mismatch between scripts: system-janitor.sh=$JANITOR_VERSION system-updater.sh=$UPDATER_VERSION"
+            exit 1
+          fi
+
+          if [ "$JANITOR_VERSION" != "$VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match VERSION=$JANITOR_VERSION"
+            exit 1
+          fi
+
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Build source tarball
+        shell: bash
+        run: |
+          set -euo pipefail
+          git archive --format=tar.gz --prefix="agent-toolkit-${VERSION}/" -o "agent-toolkit-${VERSION}.tar.gz" HEAD
+
+      - name: Compute SHA256SUMS
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum scripts/bootstrap.sh "agent-toolkit-${VERSION}.tar.gz" > SHA256SUMS
+          BOOTSTRAP_SHA="$(awk '$2 == "scripts/bootstrap.sh" { print $1 }' SHA256SUMS)"
+          if [ -z "$BOOTSTRAP_SHA" ]; then
+            echo "::error::failed to compute scripts/bootstrap.sh SHA256"
+            exit 1
+          fi
+          echo "BOOTSTRAP_SHA=$BOOTSTRAP_SHA" >> "$GITHUB_ENV"
+
+      - name: Generate release notes
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          CHANGELOG_SECTION="$(awk -v version="$VERSION" '
+            BEGIN { in_section = 0 }
+            $0 ~ ("^## \\[(v)?" version "\\]([[:space:]]+-[[:space:]].*)?$") {
+              in_section = 1
+              next
+            }
+            in_section && /^## / { exit }
+            in_section { print }
+          ' CHANGELOG.md)"
+
+          if [ -n "$(printf '%s' "$CHANGELOG_SECTION" | tr -d '[:space:]')" ]; then
+            HAVE_CHANGELOG_SECTION=1
+          else
+            HAVE_CHANGELOG_SECTION=0
+          fi
+
+          cat > release-notes.md <<EOF
+          ## Verify the installer
+
+          Bootstrap installer SHA256:
+
+          \`\`\`text
+          ${BOOTSTRAP_SHA}  scripts/bootstrap.sh
+          \`\`\`
+
+          Download, verify, then run:
+
+          \`\`\`bash
+          curl -fsSLo bootstrap.sh https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/${GITHUB_REF_NAME}/scripts/bootstrap.sh && echo "${BOOTSTRAP_SHA}  bootstrap.sh" | sha256sum -c - && bash bootstrap.sh --ref=${GITHUB_REF_NAME}
+          \`\`\`
+          EOF
+
+          if [ "$HAVE_CHANGELOG_SECTION" -eq 1 ]; then
+            {
+              echo
+              echo "## Changelog"
+              echo
+              printf '%s\n' "$CHANGELOG_SECTION"
+            } >> release-notes.md
+          else
+            cat >> release-notes.md <<EOF
+
+          ## Release notes
+
+          No dedicated CHANGELOG section was found for ${GITHUB_REF_NAME}. See [CHANGELOG.md](https://github.com/${GITHUB_REPOSITORY}/blob/${GITHUB_REF_NAME}/CHANGELOG.md) for the full history.
+          EOF
+          fi
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            agent-toolkit-${{ env.VERSION }}.tar.gz
+            SHA256SUMS
+          body_path: release-notes.md
+          name: v${{ env.VERSION }}
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}

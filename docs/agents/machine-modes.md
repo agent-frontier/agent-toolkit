@@ -131,15 +131,23 @@ Capability discovery surface. Read-only; requires no state (not even `HOME`).
   "name": "system-janitor",
   "version": "0.1.0",
   "capabilities": [
+    "aged-logs", "doctor", "doctor-json", "extra-cleanup-globs",
     "health", "health-acknowledge", "health-json", "idle-status",
     "json-schemas", "last-run-sections", "only", "report",
-    "report-bytes", "report-json", "schema-aliases", "version",
-    "version-json"
-  ]
+    "report-bytes", "report-json", "schema-aliases",
+    "toolkit-manifest", "version", "version-json"
+  ],
+  "toolkit": {
+    "name": "agent-toolkit",
+    "repo": "https://github.com/agent-frontier/agent-toolkit",
+    "tools": ["system-janitor", "system-updater"]
+  }
 }
 ```
 
-`capabilities[]` is alphabetically sorted and append-only. See
+`capabilities[]` is alphabetically sorted and append-only. `toolkit`
+advertises the toolkit family so an agent that finds one binary can
+discover its siblings from the same payload. See
 [`contracts.md`](./contracts.md#capability-contract).
 
 ## `--only` / `--sections`
@@ -176,6 +184,7 @@ Mapping (capability string → feature):
 | `last-run-sections` | `last-run.json.sections[]` present |
 | `json-schemas` | `schemas/*.schema.json` ship with the repo |
 | `schema-aliases` | `SECTION_ALIASES` remap applied before obsolete filter |
+| `toolkit-manifest` | top-level `toolkit` object in `--version --json` advertises the toolkit name, repo, and sibling tools |
 | `only` | `--only` / `--sections` flag |
 | `version` | `--version` (text) |
 | `version-json` | `--version --json` |

@@ -1,5 +1,10 @@
 # Toolkit roadmap
 
+> **Two roadmaps live in this repo.** This file (`toolkit-roadmap.md`) is the
+> menu of candidate **tools** (cert-watch, log-shipper, etc.). The
+> promotion / visibility / adoption track lives in
+> [`../promotion-roadmap.md`](../promotion-roadmap.md). They don't overlap.
+
 > What this doc is: a candidates catalog for the next agent-first tools
 > that fit the system-janitor ethos. Sibling thinking to
 > [`contracts.md`](./contracts.md) and

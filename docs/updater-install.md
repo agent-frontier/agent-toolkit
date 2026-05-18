@@ -23,11 +23,13 @@ The same checkout serves both tools.
 
 ```bash
 git clone https://github.com/agent-frontier/agent-toolkit.git ~/agent-toolkit
-ln -s ~/agent-toolkit/system-updater.sh ~/.local/bin/system-updater
-chmod +x ~/agent-toolkit/system-updater.sh
+cd ~/agent-toolkit
+./install.sh
 ```
 
-Make sure `~/.local/bin` is on your `$PATH`. Verify:
+The installer creates or repairs `~/.local/bin/system-updater` and installs
+its managed daily cron entry alongside `system-janitor`. Make sure
+`~/.local/bin` is on your `$PATH`. Verify:
 
 ```bash
 system-updater --version
@@ -60,8 +62,8 @@ unattended in v0 (no real auto-reboot, no real snapshot detection — see
 the roadmap in [CHANGELOG.md](../CHANGELOG.md)).
 
 ```cron
-# system-updater — nightly dry-run preview (every day, 02:23)
-23 2 * * * $HOME/.local/bin/system-updater --dry-run
+# system-updater — daily apt update sweep (managed by agent-toolkit install.sh)
+23 4 * * * $HOME/.local/bin/system-updater
 ```
 
 Apply manually after reviewing the preview:
