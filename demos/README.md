@@ -2,6 +2,16 @@
 
 These scripts create temporary demo workspaces under `demos/.workspaces/`, run the toolkit against isolated state, and clean up after themselves. They never touch your real state.
 
+## Quick tour
+
+Run all three demos back-to-back (≈8s total):
+
+```bash
+./demos/tour.sh
+```
+
+Exit code is `0` if every demo passed, `1` otherwise. Pass `--quiet` to suppress banner output (per-demo output still streams).
+
 ## 01-cleanup-flow.sh
 
 - **Name:** [`01-cleanup-flow.sh`](01-cleanup-flow.sh)
