@@ -47,7 +47,7 @@ section events appear only when the section actually ran.
 | Value | Meaning |
 |---|---|
 | `ok` | Section ran successfully. Default sections stay `ok` even when there was nothing to clean — "no work" is their normal steady state. |
-| `idle` | An **opt-in** section (`workspace_binobj`, `extra_cleanup`) ran successfully on a real (non-dry) run but produced no work (`items=0`, `freed_kb=0`). Signals a likely stale config: the operator pointed the section at a path that no longer matches anything. |
+| `idle` | An **opt-in** section (`workspace_binobj`, `extra_cleanup`, `aged_logs`) ran successfully on a real (non-dry) run but produced no work (`items=0`, `freed_kb=0`). Signals a likely stale config: the operator pointed the section at a path that no longer matches anything. |
 | `warn` | Section ran but encountered a non-fatal issue. Detail in `note`. |
 | `dry_run` | The run was a `--dry-run` invocation. Item counts and pre-state are still populated; nothing was modified on disk. |
 | `violated_missing` | A `JANITOR_SAFETY_FLOOR_DIRS` directory disappeared during the run. Run exits `2`. |

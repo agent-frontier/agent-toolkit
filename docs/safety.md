@@ -20,9 +20,10 @@ convention.
 - **Never deletes outside known paths.** Default sections only invoke
   toolchain-provided cleanup commands (`docker system prune`,
   `go clean -cache`, `dotnet nuget locals`) and remove `/tmp/go-build*`
-  orphans. They never touch user-owned project files. The two sections
-  that *can* touch user paths — `workspace_binobj` and `extra_cleanup` —
-  do nothing until you explicitly point them at directories via config.
+  orphans. They never touch user-owned project files. The three sections
+  that *can* touch user paths — `workspace_binobj`, `extra_cleanup`, and
+  `aged_logs` — do nothing until you explicitly point them at directories
+  via config.
 
 - **Atomic `last-run.json`.** The run summary is written to a temp file
   and atomically renamed into place. Monitoring tools, dashboards, or

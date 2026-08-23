@@ -40,7 +40,7 @@ The `status` field in JSONL events, last-run snapshot entries, and
 | Value | Where it appears | Meaning |
 |---|---|---|
 | `ok` | Any section / package, real run | Operation ran successfully. For default sections, this is the steady state even when there was nothing to clean. |
-| `idle` | Opt-in sections only (`workspace_binobj`, `extra_cleanup`) *(janitor only)*, real (non-dry) run; updater per-package idle uses the same value | Operation succeeded but produced no work. Silent-failure detector: a configured opt-in section pointed at a stale path. Surfaced via `--report --json`'s `idle_streaks` when consecutive `>= 2`. |
+| `idle` | Opt-in sections only (`workspace_binobj`, `extra_cleanup`, `aged_logs`) *(janitor only)*, real (non-dry) run; updater per-package idle uses the same value | Operation succeeded but produced no work. Silent-failure detector: a configured opt-in section pointed at a stale path. Surfaced via `--report --json`'s `idle_streaks` when consecutive `>= 2`. |
 | `dry_run` | Any section / package, `--dry-run` invocation | Operation would have run; no destructive op performed. |
 | `warn` | Any section / package | Non-fatal failure (tool missing post-`command -v` gate, transient permission issue, etc.). Free-text `note` field carries detail. |
 | `violated_missing` *(janitor only)* | `safety_integrity` only | A `JANITOR_SAFETY_FLOOR_DIRS` entry disappeared mid-run. Run exits 2. |
@@ -51,7 +51,7 @@ The `status` field in JSONL events, last-run snapshot entries, and
 `snapshot_missing`, `failed`) are documented in
 [updater-contracts.md](./updater-contracts.md#status-enum-extensions).
 
-Source of truth: `OPTIN_SECTIONS=(workspace_binobj extra_cleanup)` in
+Source of truth: `OPTIN_SECTIONS=(workspace_binobj extra_cleanup aged_logs)` in
 `system-janitor.sh` *(janitor only)*. Adding an opt-in section requires
 appending its name to that array, or the silent-failure detector won't
 cover it.

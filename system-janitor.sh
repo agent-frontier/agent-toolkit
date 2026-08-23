@@ -193,7 +193,8 @@ FLAGS:
                     silently (no JSONL event for skipped sections).
                     <list> is comma-separated, no spaces. Valid names:
                     docker_prune, go_build_cache, tmp_gobuild_orphans,
-                    workspace_binobj, extra_cleanup, nuget_http_temp.
+                    workspace_binobj, extra_cleanup, aged_logs,
+                    nuget_http_temp.
                     Execution order follows the script's declaration
                     order, NOT the order given on the command line.
                     run_start, run_end, and safety_integrity always run.
@@ -334,7 +335,8 @@ STATUS ENUM (janitor.jsonl "status" field):
                            work (items=0, freed=0). Signals a likely stale
                            config; consecutive idle runs are surfaced via
                            --report's idle_streaks output. Only emitted for
-                           opt-in sections (workspace_binobj, extra_cleanup).
+                           opt-in sections (workspace_binobj, extra_cleanup,
+                           aged_logs).
   warn                     action exited non-zero; see "note" field
   dry_run                  --dry-run; action was not executed
   violated_missing         a safety-floor dir disappeared during the run
@@ -642,7 +644,7 @@ for sec, evs in section_events.items():
         if productive:
             last_productive = {"run_id": ev.get("run_id"), "ts": ev.get("ts")}
             trailing = 0
-        elif status == "idle" or (status == "ok" and freed == 0 and items == 0):
+        elif status == "idle":
             trailing += 1
         else:
             # warn / violated_* / unknown — break the streak without
@@ -1136,8 +1138,8 @@ add("last_run_parses_sections", sections_ok, sections_detail)
 
 # check.no_long_idle_streaks (threshold: < 5)
 # Reuses the same idle-streak logic as do_report. Folds aliases, drops
-# meta + obsolete sections, counts trailing consecutive idle (or zero-work
-# ok) events on REAL runs only.
+# meta + obsolete sections, and counts trailing status=idle events on REAL
+# runs only.
 from collections import defaultdict
 
 ALIASES = {"copilot_integrity": "safety_integrity"}
@@ -1205,7 +1207,7 @@ for sec, evs in section_events.items():
         productive = (freed > 0 or items > 0)
         if productive:
             trailing = 0
-        elif status == "idle" or (status == "ok" and freed == 0 and items == 0):
+        elif status == "idle":
             trailing += 1
         else:
             trailing = 0

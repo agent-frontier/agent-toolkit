@@ -34,7 +34,7 @@ system-janitor --only docker_prune,go_build_cache --dry-run
 Notes:
 
 - Valid names: `docker_prune`, `go_build_cache`, `tmp_gobuild_orphans`,
-  `workspace_binobj`, `extra_cleanup`, `nuget_http_temp`.
+  `workspace_binobj`, `extra_cleanup`, `aged_logs`, `nuget_http_temp`.
 - Execution order follows the **script's declaration order**, not the
   order you list them on the command line.
 - `--only` composes with `--dry-run` and with the `JANITOR_*` config

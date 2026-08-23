@@ -87,7 +87,7 @@ Checks (frozen names; the schema enum locks them in):
     {"name": "last_run_parses",       "ok": true,  "detail": null},
     {"name": "last_run_integrity_ok", "ok": true,  "detail": "safety_integrity=ok, 7 sections"},
     {"name": "last_run_parses_sections", "ok": true, "detail": "7 sections well-formed"},
-    {"name": "no_long_idle_streaks",  "ok": true,  "detail": "max consecutive_idle=4 (nuget_http_temp)"}
+    {"name": "no_long_idle_streaks",  "ok": true,  "detail": "max consecutive_idle=4 (workspace_binobj)"}
   ]
 }
 ```

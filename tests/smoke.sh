@@ -529,12 +529,16 @@ assert len(ws) == 1, f"expected exactly one idle_streaks entry for workspace_bin
 e = ws[0]
 assert e["consecutive_idle_runs"] == 2, f"expected consecutive_idle_runs=2, got {e['consecutive_idle_runs']}"
 assert e["last_productive_run"] is None, f"expected last_productive_run=null, got {e['last_productive_run']!r}"
-# nuget_http_temp may or may not show up depending on whether dotnet is present
-# on the test host. If it does show up (no dotnet -> ok with 0/0), that's fine
-# — idle_streaks is universal. If dotnet IS installed and produces real freed
-# bytes, it won't show up. Either way is correct; we only assert workspace_binobj.
+default_streaks = [
+    entry for entry in data["idle_streaks"]
+    if entry["section"] == "nuget_http_temp"
+]
+assert default_streaks == [], (
+    "default status=ok sections must not appear in idle_streaks: "
+    f"{default_streaks}"
+)
 PY
-pass "--report --json idle_streaks contains workspace_binobj with consecutive_idle_runs=2, last_productive_run=null"
+pass "--report --json reports opt-in idle streaks without flagging default no-op sections"
 
 # Human --report must render the "Idle sections" block when streaks exist.
 REPORT_TXT2="${WORK2}/report.txt"
@@ -727,6 +731,27 @@ assert len(ic) == 1 and ic[0]["ok"] is False, ic
 assert "workspace_binobj" in (ic[0]["detail"] or ""), ic
 PY
 pass "case 5: --health with 5-run idle streak exits 4, no_long_idle_streaks fails"
+
+# Case 5b: five zero-work runs from a default section stay healthy. Only
+# explicit status=idle events from opt-in sections participate in streaks.
+H_DEFAULT_NOOP="${HEALTH_WORK}/default_noop"
+for _ in 1 2 3 4 5; do
+  JANITOR_LOG_DIR="$H_DEFAULT_NOOP" JANITOR_NUGET_CLEAN=no \
+    "$SCRIPT" --only nuget_http_temp >/dev/null
+done
+set +e
+JANITOR_LOG_DIR="$H_DEFAULT_NOOP" "$SCRIPT" --health --json > "${HEALTH_WORK}/dn.json" 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 0 ] || fail "--health with default no-op runs exited $rc, expected 0"
+python3 - "${HEALTH_WORK}/dn.json" <<'PY'
+import json, sys
+data = json.load(open(sys.argv[1]))
+check = [c for c in data["checks"] if c["name"] == "no_long_idle_streaks"]
+assert len(check) == 1 and check[0]["ok"] is True, check
+assert "max consecutive_idle=0" in (check[0]["detail"] or ""), check
+PY
+pass "case 5b: default status=ok no-op runs do not degrade health"
 
 # Case 6: --json without --health/--report exits 3.
 # (Already partially covered above for --report; here we ensure the new
@@ -1537,7 +1562,7 @@ assert 'status' in d and 'exit_code' in d, d
       # sections (run_start, run_end, safety_integrity) may also appear.
       python3 -c "
 import json
-action_sections = {'docker_prune','go_build_cache','tmp_gobuild_orphans','workspace_binobj','extra_cleanup','nuget_http_temp'}
+action_sections = {'docker_prune','go_build_cache','tmp_gobuild_orphans','workspace_binobj','extra_cleanup','aged_logs','nuget_http_temp'}
 seen = set()
 for line in open('${W}/janitor.jsonl'):
     line = line.strip()

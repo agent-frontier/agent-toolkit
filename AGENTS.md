@@ -132,11 +132,11 @@ When you add a section you MUST also:
 1. Append the name to the `KNOWN_SECTIONS` array (source of truth for `--only`
    validation AND execution order). Current contents (declaration order):
    `docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj
-   extra_cleanup nuget_http_temp`.
+   extra_cleanup aged_logs nuget_http_temp`.
 2. If the section is opt-in (does nothing unless the operator points a
    `JANITOR_*_DIRS` knob at a path), append it to `OPTIN_SECTIONS` too —
    that's what promotes empty real runs from `ok` to `idle` (silent-failure
-   detector). Current contents: `workspace_binobj extra_cleanup`.
+   detector). Current contents: `workspace_binobj extra_cleanup aged_logs`.
 3. Add the toggle/path env var to the defaults block, `--help` text, the
    README config table, `examples/config.example`, and the
    `required_sections` array in `tests/smoke.sh`. These five user-facing
@@ -149,8 +149,8 @@ When you add a section you MUST also:
 
 - **Two tiers of behaviour.** Defaults must be universally safe (only touch
   regenerable caches, never user files). Anything that removes user paths
-  (`workspace_binobj`, `extra_cleanup`) must be opt-in via a `JANITOR_*` var
-  that is empty by default. Do not invert this.
+  (`workspace_binobj`, `extra_cleanup`, `aged_logs`) must be opt-in via a
+  `JANITOR_*` var that is empty by default. Do not invert this.
 - **Cron-safe environment.** The script sets a fallback `PATH` and augments
   it with `~/.dotnet`, `~/.local/bin`, `~/go/bin`, `/snap/bin` because cron
   inherits a minimal env. Don't assume any other tool is on `PATH`; gate every
@@ -174,7 +174,7 @@ When you add a section you MUST also:
   `tests/smoke.sh` asserts every JSONL line parses with `json.loads`.
   The `status` enum is `ok` / `idle` / `warn` / `dry_run` /
   `violated_missing` / `violated_inode_changed`. `idle` is emitted ONLY
-  for opt-in sections (`workspace_binobj`, `extra_cleanup` — see the
+  for opt-in sections (`workspace_binobj`, `extra_cleanup`, `aged_logs` — see the
   `OPTIN_SECTIONS` array in the script) when a real (non-dry) run
   succeeds with `items=0` and `freed_kb=0`. It is the silent-failure
   detector required by the north star: an opt-in section configured
