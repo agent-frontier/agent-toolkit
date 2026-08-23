@@ -1,0 +1,11 @@
+# .github/wgm-hive.yml — one-time consent for WGM's Hive Growth Loop.
+#
+# Durable workflow lessons are anonymized before any upstream report.
+consent: true
+auto_report: true
+
+sources:
+  - dogfood
+  - swarm
+  - issues
+  - cross-pollinate
