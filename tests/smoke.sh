@@ -663,6 +663,94 @@ PY
 done
 rm -rf "$IDLE_CONFIG_WORK"
 
+# A configured opt-in section with real work is productive, not idle. Recreate
+# the work before each isolated run so both consecutive events have items > 0;
+# reporting must not turn them into an idle streak. These fixtures also guard
+# the false-idle fix from accidentally suppressing idle detection's positive
+# counterpart (actual configured work).
+echo "─── configured opt-in work stays productive ───"
+PRODUCTIVE_WORK="${WORK2}/productive-opt-in"
+mkdir -p "$PRODUCTIVE_WORK"
+for productive_section in "workspace_binobj" "extra_cleanup" "aged_logs"; do
+  case_work="${PRODUCTIVE_WORK}/${productive_section}"
+  mkdir -p "$case_work/state"
+  cfg="${case_work}/config"
+  case "$productive_section" in
+    workspace_binobj)
+      target="${case_work}/workspace/project/bin"
+      mkdir -p "$target"
+      config_var=JANITOR_WORKSPACE_DIRS
+      config_path="${case_work}/workspace"
+      ;;
+    extra_cleanup)
+      target="${case_work}/target"
+      mkdir -p "$target"
+      config_var=JANITOR_EXTRA_CLEANUP_DIRS
+      config_path="$target"
+      ;;
+    aged_logs)
+      target="${case_work}/logs/old.log"
+      mkdir -p "${case_work}/logs"
+      config_var=JANITOR_AGED_LOG_DIRS
+      config_path="${case_work}/logs"
+      ;;
+  esac
+  cat > "$cfg" <<EOF
+JANITOR_DOCKER_PRUNE=no
+JANITOR_PODMAN_PRUNE=no
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_NUGET_CLEAN=no
+${config_var}="${config_path}"
+JANITOR_AGED_LOG_DAYS=7
+EOF
+
+  for run in 1 2; do
+    # Keep the loop variable referenced so shellcheck recognizes the repeated
+    # run count as intentional; each iteration recreates the work below.
+    : "$run"
+    case "$productive_section" in
+      workspace_binobj) mkdir -p "$target" ;;
+      extra_cleanup) mkdir -p "$target" ;;
+      aged_logs)
+        mkdir -p "${case_work}/logs"
+        : > "$target"
+        touch -d '10 days ago' "$target"
+        ;;
+    esac
+    env -u JANITOR_WORKSPACE_DIRS -u JANITOR_EXTRA_CLEANUP_DIRS \
+      -u JANITOR_AGED_LOG_DIRS JANITOR_LOG_DIR="${case_work}/state" \
+      "$SCRIPT" --config "$cfg" --only "$productive_section" >/dev/null
+  done
+
+  python3 - "${case_work}/state/janitor.jsonl" "$productive_section" <<'PY' \
+    || fail "$productive_section with actionable work did not stay productive"
+import json, sys
+path, section = sys.argv[1:]
+with open(path) as fh:
+    events = [json.loads(line) for line in fh if line.strip()]
+matched = [e for e in events if e.get("section") == section]
+assert len(matched) == 2, f"expected two {section} events, got {matched!r}"
+for event in matched:
+    assert event.get("status") == "ok", event
+    assert event.get("items", 0) > 0, event
+PY
+  python3 - "${case_work}/state" "$productive_section" "$SCRIPT" <<'PY' \
+    || fail "$productive_section productive runs appeared in idle_streaks"
+import json, os, subprocess, sys
+log_dir, section, script = sys.argv[1:]
+report = subprocess.check_output(
+    [script, "--report", "--json"],
+    env={**os.environ, "JANITOR_LOG_DIR": log_dir}, text=True,
+)
+data = json.loads(report)
+leaks = [entry for entry in data.get("idle_streaks", [])
+         if entry.get("section") == section]
+assert not leaks, f"productive {section} events surfaced as idle: {leaks!r}"
+PY
+  pass "$productive_section: configured work emits productive events, not idle streaks"
+done
+
 echo "─── --health probe ──────────────────────────────────────────"
 # --health is the agent-facing trust probe. Exit codes are the contract:
 # 0 healthy, 4 degraded, 5 unknown. Read-only: never creates the log
