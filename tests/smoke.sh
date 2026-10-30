@@ -486,6 +486,22 @@ echo "─── idle status + streaks ───"
 # is the steady-state for default sections.
 WORK2="$(mktemp -d)"
 trap 'rm -rf "$WORK" "$WORK2"' EXIT
+# Idle detection compares used space on the whole host filesystem before and
+# after each section. Pin that measurement for these focused status tests so
+# unrelated activity elsewhere on the host cannot make an empty section look
+# productive (or vice versa).
+IDLE_TEST_BIN="${WORK2}/fixed-df-bin"
+mkdir -p "$IDLE_TEST_BIN"
+cat > "${IDLE_TEST_BIN}/df" <<'DF'
+#!/bin/sh
+if [ "${1:-}" = "--output=used" ]; then
+  printf 'Used\n100\n'
+else
+  printf 'Filesystem Size Used Avail Use%% Mounted on\n/dev/test 1G 1G 0 100%% /\n'
+fi
+DF
+chmod +x "${IDLE_TEST_BIN}/df"
+IDLE_TEST_PATH="${IDLE_TEST_BIN}:${PATH}"
 LOG_DIR2="${WORK2}/state"
 EMPTY_WS="${WORK2}/empty_ws"
 CONFIG2="${WORK2}/config"
@@ -500,8 +516,8 @@ JANITOR_WORKSPACE_DIRS="${EMPTY_WS}"
 EOF
 
 # Two consecutive REAL runs (not --dry-run).
-JANITOR_LOG_DIR="$LOG_DIR2" "$SCRIPT" --config "$CONFIG2" >/dev/null
-JANITOR_LOG_DIR="$LOG_DIR2" "$SCRIPT" --config "$CONFIG2" >/dev/null
+PATH="$IDLE_TEST_PATH" JANITOR_LOG_DIR="$LOG_DIR2" "$SCRIPT" --config "$CONFIG2" >/dev/null
+PATH="$IDLE_TEST_PATH" JANITOR_LOG_DIR="$LOG_DIR2" "$SCRIPT" --config "$CONFIG2" >/dev/null
 pass "two real runs against empty workspace exited 0"
 
 JSONL2="${LOG_DIR2}/janitor.jsonl"
@@ -618,7 +634,7 @@ EOF
     # The config is authoritative, but clear any caller-provided value first
     # so the unset case is truly unconfigured and independent of the shell.
     env -u JANITOR_WORKSPACE_DIRS -u JANITOR_EXTRA_CLEANUP_DIRS \
-      -u JANITOR_AGED_LOG_DIRS JANITOR_LOG_DIR="${case_work}/state" \
+      -u JANITOR_AGED_LOG_DIRS PATH="$IDLE_TEST_PATH" JANITOR_LOG_DIR="${case_work}/state" \
       "$SCRIPT" --config "$cfg" --only "$idle_section" >/dev/null
     python3 - "${case_work}/state/janitor.jsonl" "$idle_section" "$state" <<'PY' \
       || fail "${idle_section} (${state} path) produced the wrong idle status"
@@ -636,7 +652,7 @@ PY
     # A second identical real run reaches the report's documented two-run
     # threshold for idle_streaks. Unconfigured runs must remain absent.
     env -u JANITOR_WORKSPACE_DIRS -u JANITOR_EXTRA_CLEANUP_DIRS \
-      -u JANITOR_AGED_LOG_DIRS JANITOR_LOG_DIR="${case_work}/state" \
+      -u JANITOR_AGED_LOG_DIRS PATH="$IDLE_TEST_PATH" JANITOR_LOG_DIR="${case_work}/state" \
       "$SCRIPT" --config "$cfg" --only "$idle_section" >/dev/null
     python3 - "${case_work}/state" "$idle_section" "$state" "$SCRIPT" <<'PY' \
       || fail "${idle_section} (${state} path) produced the wrong report idle status"
