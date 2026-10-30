@@ -25,6 +25,7 @@ echo "keep me" > "${WORK}/safe/file"
 
 cat > "$CONFIG" <<EOF
 JANITOR_DOCKER_PRUNE=no
+JANITOR_PODMAN_PRUNE=no
 JANITOR_GO_CLEAN=no
 JANITOR_TMP_GOBUILD_ORPHANS=no
 JANITOR_NUGET_CLEAN=no
@@ -56,6 +57,7 @@ pass "audit files exist"
 required_sections=(
   run_start
   docker_prune
+  podman_prune
   go_build_cache
   tmp_gobuild_orphans
   workspace_binobj
@@ -89,7 +91,7 @@ pass "every JSONL line is valid JSON"
 
 # Action sections must report status=dry_run, not ok (the contract for --dry-run).
 # Action sections must report status=dry_run, not ok (the contract for --dry-run).
-for s in docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp; do
+for s in docker_prune podman_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp; do
   grep -q "\"section\":\"${s}\",\"status\":\"dry_run\"" "$JSONL" \
     || fail "section '${s}' did not report status=dry_run"
 done
@@ -185,7 +187,7 @@ pass "--report exited 0"
 
 grep -q "system-janitor — report" "$REPORT_OUT" || fail "--report missing header"
 grep -q "log dir : ${LOG_DIR}" "$REPORT_OUT"    || fail "--report missing log dir line"
-for s in docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp; do
+for s in docker_prune podman_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp; do
   grep -q "$s" "$REPORT_OUT" || fail "--report output missing section '$s'"
 done
 pass "--report output mentions all sections"
@@ -567,6 +569,100 @@ PY
 pass "--report --json idle_streaks is [] for dry-run-only log"
 
 echo
+echo "─── opt-in idle requires configured path ───"
+# Unconfigured opt-in paths are not an idle signal: those sections were not
+# opted into and therefore have no meaningful "nothing to clean" result.
+# Conversely, a configured path with no matching work is a real idle run.
+# Exercise all three opt-in sections against unset, explicitly-empty, and
+# configured-empty paths in isolated runs so one case cannot affect another.
+IDLE_CONFIG_WORK="${WORK2}/idle-config"
+mkdir -p "$IDLE_CONFIG_WORK"
+IDLE_SECTIONS=(workspace_binobj extra_cleanup aged_logs)
+IDLE_VARS=(JANITOR_WORKSPACE_DIRS JANITOR_EXTRA_CLEANUP_DIRS JANITOR_AGED_LOG_DIRS)
+for i in "${!IDLE_SECTIONS[@]}"; do
+  idle_section="${IDLE_SECTIONS[$i]}"
+  idle_var="${IDLE_VARS[$i]}"
+  for state in unset empty configured; do
+    case_work="${IDLE_CONFIG_WORK}/${idle_section}-${state}"
+    mkdir -p "${case_work}/state"
+    cfg="${case_work}/config"
+    cat > "$cfg" <<EOF
+JANITOR_DOCKER_PRUNE=no
+JANITOR_PODMAN_PRUNE=no
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_NUGET_CLEAN=no
+EOF
+    case "$state" in
+      empty)
+        printf '%s=""\n' "$idle_var" >> "$cfg"
+        ;;
+      configured)
+        case "$idle_section" in
+          workspace_binobj)
+            mkdir -p "${case_work}/workspace"
+            printf '%s="%s"\n' "$idle_var" "${case_work}/workspace" >> "$cfg"
+            ;;
+          extra_cleanup)
+            # A configured path that does not exist yields a successful no-op.
+            printf '%s="%s"\n' "$idle_var" "${case_work}/absent-target" >> "$cfg"
+            ;;
+          aged_logs)
+            mkdir -p "${case_work}/logs"
+            printf '%s="%s"\n' "$idle_var" "${case_work}/logs" >> "$cfg"
+            ;;
+        esac
+        ;;
+    esac
+
+    # The config is authoritative, but clear any caller-provided value first
+    # so the unset case is truly unconfigured and independent of the shell.
+    env -u JANITOR_WORKSPACE_DIRS -u JANITOR_EXTRA_CLEANUP_DIRS \
+      -u JANITOR_AGED_LOG_DIRS JANITOR_LOG_DIR="${case_work}/state" \
+      "$SCRIPT" --config "$cfg" --only "$idle_section" >/dev/null
+    python3 - "${case_work}/state/janitor.jsonl" "$idle_section" "$state" <<'PY' \
+      || fail "${idle_section} (${state} path) produced the wrong idle status"
+import json, sys
+path, section, state = sys.argv[1:]
+with open(path) as fh:
+    events = [json.loads(line) for line in fh if line.strip()]
+matched = [event for event in events if event.get("section") == section]
+assert len(matched) == 1, f"expected one {section} event, got {matched!r}"
+expected = "idle" if state == "configured" else "ok"
+assert matched[0].get("status") == expected, (
+    f"{section} with {state} path: expected {expected}, got {matched[0]!r}"
+)
+PY
+    # A second identical real run reaches the report's documented two-run
+    # threshold for idle_streaks. Unconfigured runs must remain absent.
+    env -u JANITOR_WORKSPACE_DIRS -u JANITOR_EXTRA_CLEANUP_DIRS \
+      -u JANITOR_AGED_LOG_DIRS JANITOR_LOG_DIR="${case_work}/state" \
+      "$SCRIPT" --config "$cfg" --only "$idle_section" >/dev/null
+    python3 - "${case_work}/state" "$idle_section" "$state" "$SCRIPT" <<'PY' \
+      || fail "${idle_section} (${state} path) produced the wrong report idle status"
+import json, os, subprocess, sys
+log_dir, section, state, script = sys.argv[1:]
+report = subprocess.check_output(
+    [script, "--report", "--json"],
+    env={**os.environ, "JANITOR_LOG_DIR": log_dir}, text=True,
+)
+data = json.loads(report)
+sections = [entry for entry in data.get("idle_streaks", [])
+            if entry.get("section") == section]
+expected_count = 1 if state == "configured" else 0
+assert len(sections) == expected_count, (
+    f"{section} with {state} path: expected {expected_count} idle_streak entries, "
+    f"got {sections!r}"
+)
+if sections:
+    assert sections[0].get("consecutive_idle_runs") == 2, sections[0]
+PY
+    if [ "$state" = configured ]; then expected=idle; else expected=ok; fi
+    pass "$idle_section: $state path -> $expected"
+  done
+done
+rm -rf "$IDLE_CONFIG_WORK"
+
 echo "─── --health probe ──────────────────────────────────────────"
 # --health is the agent-facing trust probe. Exit codes are the contract:
 # 0 healthy, 4 degraded, 5 unknown. Read-only: never creates the log
@@ -813,22 +909,22 @@ grep -q '"section":"docker_prune","status":"dry_run"' "${ONLY_W1}/janitor.jsonl"
 rm -rf "$ONLY_W1"
 pass "case 1: --only docker_prune --dry-run emits exactly run_start,docker_prune,safety_integrity,run_end"
 
-# Case 2: --only docker_prune,go_build_cache --dry-run → exactly 5 events
-# in declaration order (docker_prune BEFORE go_build_cache).
+# Case 2: --only docker_prune,podman_prune,go_build_cache --dry-run →
+# exactly 6 events, in declaration order (Docker before Podman before Go).
 ONLY_W2="$(mktemp -d)"
-JANITOR_LOG_DIR="${ONLY_W2}" "$SCRIPT" --only docker_prune,go_build_cache --dry-run >/dev/null
+JANITOR_LOG_DIR="${ONLY_W2}" "$SCRIPT" --only docker_prune,podman_prune,go_build_cache --dry-run >/dev/null
 got2="$(_only_sections "${ONLY_W2}/janitor.jsonl" | paste -sd, -)"
-want2="run_start,docker_prune,go_build_cache,safety_integrity,run_end"
+want2="run_start,docker_prune,podman_prune,go_build_cache,safety_integrity,run_end"
 [ "$got2" = "$want2" ] \
-  || fail "case 2: --only docker_prune,go_build_cache sections mismatch: got [$got2] want [$want2]"
+  || fail "case 2: --only section order mismatch: got [$got2] want [$want2]"
 rm -rf "$ONLY_W2"
-pass "case 2: --only docker_prune,go_build_cache produces 5 events in declaration order"
+pass "case 2: --only emits Docker, Podman, Go in declaration order"
 
 # Case 3: Reverse input order — output order MUST still be declaration order.
 ONLY_W3="$(mktemp -d)"
-JANITOR_LOG_DIR="${ONLY_W3}" "$SCRIPT" --only go_build_cache,docker_prune --dry-run >/dev/null
+JANITOR_LOG_DIR="${ONLY_W3}" "$SCRIPT" --only go_build_cache,podman_prune,docker_prune --dry-run >/dev/null
 got3="$(_only_sections "${ONLY_W3}/janitor.jsonl" | paste -sd, -)"
-want3="run_start,docker_prune,go_build_cache,safety_integrity,run_end"
+want3="run_start,docker_prune,podman_prune,go_build_cache,safety_integrity,run_end"
 [ "$got3" = "$want3" ] \
   || fail "case 3: --only with reversed input must still emit declaration order: got [$got3] want [$want3]"
 rm -rf "$ONLY_W3"
@@ -1066,10 +1162,10 @@ VERSION_W1="$(mktemp -d)"
 ( cd "$VERSION_W1" && "$SCRIPT" --version > "$VERSION_W1/out" 2> "$VERSION_W1/err" )
 rc=$?
 [ "$rc" = 0 ] || fail "--version: expected exit 0, got $rc"
-grep -Eq '^system-janitor 0\.1\.0$' "$VERSION_W1/out" \
-  || fail "--version: stdout did not match '^system-janitor 0\\.1\\.0\$' (got: $(cat "$VERSION_W1/out"))"
+grep -Eq '^system-janitor 0\.2\.0$' "$VERSION_W1/out" \
+  || fail "--version: stdout did not match '^system-janitor 0\\.2\\.0\$' (got: $(cat "$VERSION_W1/out"))"
 rm -rf "$VERSION_W1"
-pass "case 1: --version exits 0 and prints 'system-janitor 0.1.0'"
+pass "case 1: --version exits 0 and prints 'system-janitor 0.2.0'"
 
 # Case 2: --version --json is valid JSON with required shape.
 VERSION_W2="$(mktemp -d)"
@@ -1493,6 +1589,7 @@ EXPECTED=(
   json-schemas
   last-run-sections
   only
+  podman-prune
   report
   report-json
   schema-aliases
@@ -1520,6 +1617,44 @@ probe_fail() { fail "capability completeness: probe for '$1' failed — $2"; }
 
 for cap in "${CLAIMED[@]}"; do
   case "$cap" in
+    podman-prune)
+      W="${CAP_WORK}/p_podman"; mkdir -p "$W/bin" "$W/state"
+      PODMAN_CALLS="${W}/calls"
+      cat > "$W/bin/podman" <<'PODMAN'
+#!/usr/bin/env bash
+set -u
+case "${1:-}" in
+  info) exit 0 ;;
+  images) printf 'image-id-1 0\nimage-id-2 0\n'; exit 0 ;;
+  image)
+    [ "${2:-}" = "prune" ] && [ "${3:-}" = "--all" ] && [ "${4:-}" = "--force" ] || exit 97
+    printf '%s\n' "$*" >> "$PODMAN_CALLS"
+    printf 'Deleted Images: fake-image\n'
+    exit 0
+    ;;
+  *) echo "unexpected podman arguments: $*" >&2; exit 98 ;;
+esac
+PODMAN
+      chmod +x "$W/bin/podman"
+      CFG="${W}/cfg"
+      cat > "$CFG" <<'EOF'
+JANITOR_DOCKER_PRUNE=no
+JANITOR_PODMAN_PRUNE=yes
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_NUGET_CLEAN=no
+EOF
+      set +e
+      PATH="${W}/bin:${PATH}" PODMAN_CALLS="$PODMAN_CALLS" JANITOR_LOG_DIR="${W}/state" \
+        "$SCRIPT" --config "$CFG" --only podman_prune > "${W}/out" 2>&1
+      rc=$?
+      set -e
+      [ "$rc" -eq 0 ] || { cat "${W}/out"; probe_fail "$cap" "run exit $rc"; }
+      grep -qx 'image prune --all --force' "$PODMAN_CALLS" \
+        || probe_fail "$cap" "did not invoke only podman image prune --all --force"
+      grep -q '"section":"podman_prune","status":"ok".*"items":2' "${W}/state/janitor.jsonl" \
+        || probe_fail "$cap" "did not record two dangling image candidates"
+      ;;
     report)
       set +e; "$SCRIPT" --report > "${CAP_WORK}/p_report.out" 2>&1; rc=$?; set -e
       [ "$rc" -eq 0 ] || probe_fail "$cap" "exit $rc, expected 0"
@@ -1562,7 +1697,7 @@ assert 'status' in d and 'exit_code' in d, d
       # sections (run_start, run_end, safety_integrity) may also appear.
       python3 -c "
 import json
-action_sections = {'docker_prune','go_build_cache','tmp_gobuild_orphans','workspace_binobj','extra_cleanup','aged_logs','nuget_http_temp'}
+action_sections = {'docker_prune','podman_prune','go_build_cache','tmp_gobuild_orphans','workspace_binobj','extra_cleanup','aged_logs','nuget_http_temp'}
 seen = set()
 for line in open('${W}/janitor.jsonl'):
     line = line.strip()
