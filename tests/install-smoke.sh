@@ -7,6 +7,7 @@ CERTWATCH_SCRIPT="$REPO_ROOT/cert-watch.sh"
 LOG_SHIPPER_SCRIPT="$REPO_ROOT/log-shipper.sh"
 JANITOR_SCRIPT="$REPO_ROOT/system-janitor.sh"
 UPDATER_SCRIPT="$REPO_ROOT/system-updater.sh"
+CRON_RUN_SCRIPT="$REPO_ROOT/scripts/cron-run.sh"
 WORK_DIR="$REPO_ROOT/tests/.install-smoke.$$"
 trap 'rm -rf "$WORK_DIR"' EXIT
 mkdir -p "$WORK_DIR"
@@ -156,6 +157,11 @@ ln -s "$HOME_ONE/system-janitor/system-janitor.sh" "$HOME_ONE/.local/bin/system-
 cat > "$HOME_ONE/.crontab.stub" <<EOF
 # existing unrelated job
 5 1 * * * /usr/bin/true
+5 2 * * * /usr/bin/echo system-janitor
+17 2 * * * '/old/.local/bin/agent-toolkit-cron' '/old/.local/bin/system-janitor'
+42 6 * * * '/old/.local/bin/agent-toolkit-cron' '/old/.local/bin/cert-watch'
+23 3 * * * '/old/.local/bin/agent-toolkit-cron' '/old/.local/bin/system-updater'
+7 * * * * '/old/.local/bin/agent-toolkit-cron' '/old/.local/bin/log-shipper'
 # cert-watch — daily TLS certificate inventory (managed by agent-toolkit install.sh)
 42 6 * * * $HOME_ONE/system-janitor/cert-watch.sh
 # system-janitor — weekly disk cleanup (managed by agent-toolkit install.sh)
@@ -177,17 +183,18 @@ assert_symlink_target "$HOME_ONE/.local/bin/cert-watch" "$CERTWATCH_EXPECTED"
 assert_symlink_target "$HOME_ONE/.local/bin/log-shipper" "$LOG_SHIPPER_EXPECTED"
 assert_symlink_target "$HOME_ONE/.local/bin/system-janitor" "$JANITOR_EXPECTED"
 assert_symlink_target "$HOME_ONE/.local/bin/system-updater" "$UPDATER_EXPECTED"
+assert_symlink_target "$HOME_ONE/.local/bin/agent-toolkit-cron" "$(realpath "$CRON_RUN_SCRIPT")"
 pass "symlinks created/repaired"
 
 CRON_FILE="$HOME_ONE/.crontab.stub"
-CERTWATCH_COMMENT='# cert-watch — daily TLS certificate inventory (managed by agent-toolkit install.sh)'
-CERTWATCH_JOB="42 6 * * * $HOME_ONE/.local/bin/cert-watch"
-LOG_SHIPPER_COMMENT='# log-shipper — hourly audit-trail export (managed by agent-toolkit install.sh)'
-LOG_SHIPPER_JOB="7 * * * * $HOME_ONE/.local/bin/log-shipper"
-JANITOR_COMMENT='# system-janitor — weekly disk cleanup (managed by agent-toolkit install.sh)'
-JANITOR_JOB="17 3 * * 0 $HOME_ONE/.local/bin/system-janitor"
+CERTWATCH_COMMENT='# cert-watch — hourly TLS certificate inventory (managed by agent-toolkit install.sh)'
+CERTWATCH_JOB="42 * * * * '$HOME_ONE/.local/bin/agent-toolkit-cron' '$HOME_ONE/.local/bin/cert-watch'"
+LOG_SHIPPER_COMMENT='# log-shipper — quarter-hourly audit-trail export (managed by agent-toolkit install.sh)'
+LOG_SHIPPER_JOB="7,22,37,52 * * * * '$HOME_ONE/.local/bin/agent-toolkit-cron' '$HOME_ONE/.local/bin/log-shipper'"
+JANITOR_COMMENT='# system-janitor — daily disk cleanup (managed by agent-toolkit install.sh)'
+JANITOR_JOB="17 3 * * * '$HOME_ONE/.local/bin/agent-toolkit-cron' '$HOME_ONE/.local/bin/system-janitor'"
 UPDATER_COMMENT='# system-updater — daily apt update sweep (managed by agent-toolkit install.sh)'
-UPDATER_JOB="23 4 * * * $HOME_ONE/.local/bin/system-updater"
+UPDATER_JOB="23 4 * * * '$HOME_ONE/.local/bin/agent-toolkit-cron' '$HOME_ONE/.local/bin/system-updater'"
 assert_one_line "$CERTWATCH_COMMENT" "$CRON_FILE"
 assert_one_line "$CERTWATCH_JOB" "$CRON_FILE"
 assert_one_line "$LOG_SHIPPER_COMMENT" "$CRON_FILE"
@@ -196,7 +203,14 @@ assert_one_line "$JANITOR_COMMENT" "$CRON_FILE"
 assert_one_line "$JANITOR_JOB" "$CRON_FILE"
 assert_one_line "$UPDATER_COMMENT" "$CRON_FILE"
 assert_one_line "$UPDATER_JOB" "$CRON_FILE"
-pass "cron entries present exactly once"
+assert_one_line '5 1 * * * /usr/bin/true' "$CRON_FILE"
+assert_one_line '5 2 * * * /usr/bin/echo system-janitor' "$CRON_FILE"
+! grep -Fq '/old/.local/bin/' "$CRON_FILE" || fail 'stale quoted launcher jobs survived migration'
+pass "cron entries present exactly once; quoted jobs migrated, unrelated jobs preserved"
+# Public help must not contradict the installed cadence after a schedule change.
+"$JANITOR_SCRIPT" --help | grep -F '17 3 * * *' >/dev/null || fail 'janitor help cadence stale'
+"$CERTWATCH_SCRIPT" --help | grep -F '42 * * * *' >/dev/null || fail 'cert help cadence stale'
+"$LOG_SHIPPER_SCRIPT" --help | grep -F '7,22,37,52 * * * *' >/dev/null || fail 'export help cadence stale'
 
 grep -Fq 'repaired' "$WORK_DIR/install.out" || fail 'expected repair summary in install output'
 pass "summary reports repairs"
@@ -234,11 +248,72 @@ run_install "$HOME_DRY" --dry-run > "$WORK_DIR/dry-run.out"
 [ ! -e "$HOME_DRY/.local/bin/log-shipper" ] || fail '--dry-run created log-shipper symlink'
 [ ! -e "$HOME_DRY/.local/bin/system-janitor" ] || fail '--dry-run created janitor symlink'
 [ ! -e "$HOME_DRY/.local/bin/system-updater" ] || fail '--dry-run created updater symlink'
+[ ! -e "$HOME_DRY/.local/bin/agent-toolkit-cron" ] || fail '--dry-run created cron launcher symlink'
 [ ! -e "$HOME_DRY/.crontab.stub" ] || fail '--dry-run wrote crontab stub'
 [ ! -e "$HOME_DRY/.config/agent-toolkit/manifest.json" ] || fail '--dry-run created manifest.json'
 grep -Fq 'would have created' "$WORK_DIR/dry-run.out" || fail '--dry-run output missing preview text'
 grep -Fq 'manifest               : would have written -> ' "$WORK_DIR/dry-run.out" || fail '--dry-run output missing manifest preview'
-pass "--dry-run has no side effects"
+for expected in \
+  "42 * * * * '$HOME_DRY/.local/bin/agent-toolkit-cron' '$HOME_DRY/.local/bin/cert-watch'" \
+  "7,22,37,52 * * * * '$HOME_DRY/.local/bin/agent-toolkit-cron' '$HOME_DRY/.local/bin/log-shipper'" \
+  "17 3 * * * '$HOME_DRY/.local/bin/agent-toolkit-cron' '$HOME_DRY/.local/bin/system-janitor'" \
+  "23 4 * * * '$HOME_DRY/.local/bin/agent-toolkit-cron' '$HOME_DRY/.local/bin/system-updater'"; do
+  grep -Fq "$expected" "$WORK_DIR/dry-run.out" || fail 'dry-run omitted an exact scheduled command'
+done
+pass "--dry-run has no side effects and previews exact commands"
+
+echo "── launcher real-file collision ─────────────────────────────"
+HOME_COLLISION="$(make_home home-collision)"
+mkdir -p "$HOME_COLLISION/.local/bin"
+printf 'user-owned executable\n' > "$HOME_COLLISION/.local/bin/agent-toolkit-cron"
+if run_install "$HOME_COLLISION" > "$WORK_DIR/collision.out" 2>&1; then
+  fail 'installer overwrote a real launcher file'
+fi
+grep -Fq 'user-owned executable' "$HOME_COLLISION/.local/bin/agent-toolkit-cron" || fail 'collision file changed'
+[ ! -e "$HOME_COLLISION/.crontab.stub" ] || fail 'collision changed cron'
+pass "launcher real-file collision refused without clobbering"
+
+echo "── spaced and percent HOME cron execution ─────────────────"
+HOME_SPECIAL="$(make_home "home special%slash\\%quote'end")"
+run_install "$HOME_SPECIAL" > "$WORK_DIR/special.out"
+rm "$HOME_SPECIAL/.local/bin/system-janitor"
+cat > "$HOME_SPECIAL/.local/bin/system-janitor" <<'STUB'
+#!/usr/bin/env bash
+printf 'janitor stub ran\n' > "$HOME/cron-stub-ran"
+STUB
+chmod +x "$HOME_SPECIAL/.local/bin/system-janitor"
+SPECIAL_JOB="$(grep '^17 3 ' "$HOME_SPECIAL/.crontab.stub")"
+SPECIAL_COMMAND="${SPECIAL_JOB#* * * * * }"
+# Doctor resolves the final token from raw crontab, before cron's unescaping.
+SPECIAL_COMMAND="$SPECIAL_COMMAND" HOME_SPECIAL="$HOME_SPECIAL" python3 - <<'PY'
+import os
+import shlex
+assert shlex.split(os.environ["SPECIAL_COMMAND"])[-1] == os.environ["HOME_SPECIAL"] + "/.local/bin/system-janitor"
+PY
+# Mirror cron's escape-state scanner: even backslash parity before % splits
+# commands into stdin. String replacement would conceal this real cron failure.
+SPECIAL_COMMAND="$(SPECIAL_COMMAND="$SPECIAL_COMMAND" python3 - <<'PY'
+import os
+out = []
+escaped = False
+for ch in os.environ["SPECIAL_COMMAND"]:
+    if ch == "\\" and not escaped:
+        escaped = True
+        continue
+    if ch == "%" and not escaped:
+        raise SystemExit("unescaped cron percent would split command into stdin")
+    if escaped and ch != "%":
+        out.append("\\")
+    out.append(ch)
+    escaped = False
+if escaped:
+    out.append("\\")
+print("".join(out))
+PY
+)"
+HOME="$HOME_SPECIAL" XDG_STATE_HOME="$HOME_SPECIAL/state" PATH=/usr/bin:/bin /bin/sh -c "$SPECIAL_COMMAND"
+[ -f "$HOME_SPECIAL/cron-stub-ran" ] || fail 'cron command did not execute stub from spaced/percent HOME'
+pass "quoted percent-bearing cron command executes after cron unescaping"
 
 echo "── quiet ────────────────────────────────────────────────────"
 HOME_QUIET="$(make_home home-quiet)"
@@ -251,6 +326,7 @@ assert_symlink_target "$HOME_QUIET/.local/bin/cert-watch" "$CERTWATCH_EXPECTED"
 assert_symlink_target "$HOME_QUIET/.local/bin/log-shipper" "$LOG_SHIPPER_EXPECTED"
 assert_symlink_target "$HOME_QUIET/.local/bin/system-janitor" "$JANITOR_EXPECTED"
 assert_symlink_target "$HOME_QUIET/.local/bin/system-updater" "$UPDATER_EXPECTED"
+assert_symlink_target "$HOME_QUIET/.local/bin/agent-toolkit-cron" "$(realpath "$CRON_RUN_SCRIPT")"
 [ -f "$HOME_QUIET/.crontab.stub" ] || fail '--quiet run did not install cron entries'
 pass "--quiet suppresses regular summary but prints manifest changes"
 

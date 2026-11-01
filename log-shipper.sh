@@ -18,7 +18,7 @@
 set -uo pipefail
 
 # ── Version ────────────────────────────────────────────────────────────
-readonly VERSION="0.1.0"
+readonly VERSION="0.2.0"
 readonly TOOLKIT_NAME="agent-toolkit"
 readonly TOOLKIT_REPO="https://github.com/agent-frontier/agent-toolkit"
 readonly -a TOOLKIT_TOOLS=(cert-watch log-shipper system-janitor system-updater)
@@ -244,8 +244,8 @@ EXIT CODES:
   5   --health/--doctor: unknown (foundational signal missing)
 
 EXAMPLES:
-  # Hourly cron export (installer default: minute 7)
-  7 * * * * $HOME/.local/bin/log-shipper
+  # Quarter-hourly cron export (installer default: minutes 7,22,37,52)
+  7,22,37,52 * * * * "$HOME/.local/bin/agent-toolkit-cron" "$HOME/.local/bin/log-shipper"
 
   # One-shot Prometheus export
   LOG_SHIPPER_SOURCES="$HOME/.local/state/janitor/janitor.jsonl" \
@@ -1720,7 +1720,7 @@ if active_otlp:
     for ev in enriched_events:
         grouped[ev.get("tool") or "unknown"].append(ev)
     for tool, evs in sorted(grouped.items()):
-        scope = {"scope": {"name": "log-shipper", "version": "0.1.0"}, "logRecords": []}
+        scope = {"scope": {"name": "log-shipper", "version": "0.2.0"}, "logRecords": []}
         for ev in evs:
             dt = parse_ts(ev.get("ts"))
             scope["logRecords"].append({

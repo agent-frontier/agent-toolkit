@@ -24,7 +24,7 @@ set -uo pipefail
 # exit codes, JSONL/report/health schemas). The capabilities array in
 # do_version() below is the authoritative feature-detection surface for
 # autonomous agents — they should query `--version --json`.
-readonly VERSION="0.1.0"
+readonly VERSION="0.2.0"
 readonly TOOLKIT_NAME="agent-toolkit"
 readonly TOOLKIT_REPO="https://github.com/agent-frontier/agent-toolkit"
 readonly -a TOOLKIT_TOOLS=(cert-watch log-shipper system-janitor system-updater)

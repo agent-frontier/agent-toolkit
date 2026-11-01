@@ -9,8 +9,8 @@ usage() {
 Usage: ./install.sh [--dry-run] [--quiet]
 
 Create or repair ~/.local/bin symlinks for cert-watch, log-shipper,
-system-janitor, and system-updater, and install the managed cron entries
-for all four tools.
+system-janitor, system-updater, and the cron launcher, and install the
+managed cron entries for all four tools.
 
 Options:
   --dry-run   Preview changes without modifying symlinks or crontab
@@ -63,6 +63,8 @@ for arg in "$@"; do
 done
 
 [ -n "${HOME:-}" ] || die 'HOME must be set'
+[[ "$HOME" = /* && "$HOME" != *$'\n'* && "$HOME" != *$'\r'* ]] || die 'HOME must be an absolute, single-line path'
+command -v python3 >/dev/null 2>&1 || die 'python3 command not found'
 
 SCRIPT_SELF="${BASH_SOURCE[0]}"
 SCRIPT_DIR="$(cd "$(dirname "$SCRIPT_SELF")" && pwd)"
@@ -71,6 +73,7 @@ CERTWATCH_TARGET="$(resolve_path "$REPO_DIR/cert-watch.sh")" || die 'cert-watch.
 JANITOR_TARGET="$(resolve_path "$REPO_DIR/system-janitor.sh")" || die 'system-janitor.sh not found next to install.sh'
 UPDATER_TARGET="$(resolve_path "$REPO_DIR/system-updater.sh")" || die 'system-updater.sh not found next to install.sh'
 LOG_SHIPPER_TARGET="$(resolve_path "$REPO_DIR/log-shipper.sh")" || die 'log-shipper.sh not found next to install.sh'
+CRON_RUN_TARGET="$(resolve_path "$REPO_DIR/scripts/cron-run.sh")" || die 'scripts/cron-run.sh not found next to install.sh'
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 case "$CONFIG_HOME" in
   /*) ;;
@@ -81,16 +84,32 @@ CERTWATCH_LINK="$BIN_DIR/cert-watch"
 LOG_SHIPPER_LINK="$BIN_DIR/log-shipper"
 JANITOR_LINK="$BIN_DIR/system-janitor"
 UPDATER_LINK="$BIN_DIR/system-updater"
+CRON_RUN_LINK="$BIN_DIR/agent-toolkit-cron"
 MANIFEST_DIR="$CONFIG_HOME/agent-toolkit"
 MANIFEST_PATH="$MANIFEST_DIR/manifest.json"
-CERTWATCH_COMMENT='# cert-watch — daily TLS certificate inventory (managed by agent-toolkit install.sh)'
-CERTWATCH_JOB="42 6 * * * $CERTWATCH_LINK"
-LOG_SHIPPER_COMMENT='# log-shipper — hourly audit-trail export (managed by agent-toolkit install.sh)'
-LOG_SHIPPER_JOB="7 * * * * $LOG_SHIPPER_LINK"
-JANITOR_COMMENT='# system-janitor — weekly disk cleanup (managed by agent-toolkit install.sh)'
-JANITOR_JOB="17 3 * * 0 $JANITOR_LINK"
+cron_quote() {
+  local value="$1" out="'" char i
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      "'") out+="'\\''" ;;
+      # Unquoted escaped percent between quoted segments is recognized by
+      # both cron's parity scanner and native doctor's shlex path resolution.
+      '%') out+="'\\%'" ;;
+      *) out+="$char" ;;
+    esac
+  done
+  printf '%s' "$out'"
+}
+
+CERTWATCH_COMMENT='# cert-watch — hourly TLS certificate inventory (managed by agent-toolkit install.sh)'
+CERTWATCH_JOB="42 * * * * $(cron_quote "$CRON_RUN_LINK") $(cron_quote "$CERTWATCH_LINK")"
+LOG_SHIPPER_COMMENT='# log-shipper — quarter-hourly audit-trail export (managed by agent-toolkit install.sh)'
+LOG_SHIPPER_JOB="7,22,37,52 * * * * $(cron_quote "$CRON_RUN_LINK") $(cron_quote "$LOG_SHIPPER_LINK")"
+JANITOR_COMMENT='# system-janitor — daily disk cleanup (managed by agent-toolkit install.sh)'
+JANITOR_JOB="17 3 * * * $(cron_quote "$CRON_RUN_LINK") $(cron_quote "$JANITOR_LINK")"
 UPDATER_COMMENT='# system-updater — daily apt update sweep (managed by agent-toolkit install.sh)'
-UPDATER_JOB="23 4 * * * $UPDATER_LINK"
+UPDATER_JOB="23 4 * * * $(cron_quote "$CRON_RUN_LINK") $(cron_quote "$UPDATER_LINK")"
 
 extract_version() {
   local script_path="$1"
@@ -137,12 +156,12 @@ ensure_bin_dir() {
 }
 
 build_manifest_content() {
-  python3 - "$TOOLKIT_VERSION" "$REPO_DIR" "$CERTWATCH_LINK" "$CERTWATCH_TARGET" "$LOG_SHIPPER_LINK" "$LOG_SHIPPER_TARGET" "$JANITOR_LINK" "$JANITOR_TARGET" "$UPDATER_LINK" "$UPDATER_TARGET" "$REPO_DIR/AGENTS.md" "$REPO_DIR/docs/agents/" <<'PY'
+  python3 - "$TOOLKIT_VERSION" "$REPO_DIR" "$CERTWATCH_LINK" "$CERTWATCH_TARGET" "$LOG_SHIPPER_LINK" "$LOG_SHIPPER_TARGET" "$JANITOR_LINK" "$JANITOR_TARGET" "$UPDATER_LINK" "$UPDATER_TARGET" "$CRON_RUN_LINK" "$CRON_RUN_TARGET" "$REPO_DIR/AGENTS.md" "$REPO_DIR/docs/agents/" <<'PY'
 import datetime
 import json
 import sys
 
-version, install_root, certwatch_bin, certwatch_src, log_shipper_bin, log_shipper_src, janitor_bin, janitor_src, updater_bin, updater_src, agents_md, agents_dir = sys.argv[1:]
+version, install_root, certwatch_bin, certwatch_src, log_shipper_bin, log_shipper_src, janitor_bin, janitor_src, updater_bin, updater_src, cron_bin, cron_src, agents_md, agents_dir = sys.argv[1:]
 manifest = {
     "name": "agent-toolkit",
     "version": version,
@@ -154,6 +173,9 @@ manifest = {
         {"name": "system-janitor", "binary": janitor_bin, "source": janitor_src},
         {"name": "system-updater", "binary": updater_bin, "source": updater_src},
     ],
+    "supporting": {
+        "cron_launcher": {"binary": cron_bin, "source": cron_src},
+    },
     "docs": {
         "agents_md": agents_md,
         "agents_dir": agents_dir,
@@ -264,23 +286,26 @@ tool_matches_cron_line() {
     ''|'#'*) return 1 ;;
   esac
 
-  case "$tool" in
-    cert-watch)
-      [[ "$line" =~ (^|[[:space:]])([^[:space:]]*/)?cert-watch(\.sh)?([[:space:]]|$) ]]
-      ;;
-    janitor)
-      [[ "$line" =~ (^|[[:space:]])([^[:space:]]*/)?system-janitor(\.sh)?([[:space:]]|$) ]]
-      ;;
-    updater)
-      [[ "$line" =~ (^|[[:space:]])([^[:space:]]*/)?system-updater(\.sh)?([[:space:]]|$) ]]
-      ;;
-    log-shipper)
-      [[ "$line" =~ (^|[[:space:]])([^[:space:]]*/)?log-shipper(\.sh)?([[:space:]]|$) ]]
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  python3 - "$line" "$tool" <<'PY'
+import os
+import shlex
+import sys
+
+line, tool = sys.argv[1:]
+expected = {"cert-watch": "cert-watch", "janitor": "system-janitor",
+            "updater": "system-updater", "log-shipper": "log-shipper"}.get(tool)
+try:
+    tokens = shlex.split(line)
+except ValueError:
+    sys.exit(1)  # Never remove a job whose shell syntax we cannot recognize.
+command = tokens[1:] if tokens and tokens[0].startswith("@") else tokens[5:]
+if not command or not expected:
+    sys.exit(1)
+name = os.path.basename(command[0])
+if name == "agent-toolkit-cron":
+    name = os.path.basename(command[1]) if len(command) > 1 else ""
+sys.exit(0 if name in (expected, expected + ".sh") else 1)
+PY
 }
 
 load_current_crontab() {
@@ -482,6 +507,7 @@ ensure_symlink "$CERTWATCH_LINK" "$CERTWATCH_TARGET" CERTWATCH_LINK_STATUS
 ensure_symlink "$LOG_SHIPPER_LINK" "$LOG_SHIPPER_TARGET" LOG_SHIPPER_LINK_STATUS
 ensure_symlink "$JANITOR_LINK" "$JANITOR_TARGET" JANITOR_LINK_STATUS
 ensure_symlink "$UPDATER_LINK" "$UPDATER_TARGET" UPDATER_LINK_STATUS
+ensure_symlink "$CRON_RUN_LINK" "$CRON_RUN_TARGET" CRON_RUN_LINK_STATUS
 
 CERTWATCH_CRON_SUMMARY="$(with_dry_prefix "$CERTWATCH_CRON_STATUS")"
 LOG_SHIPPER_CRON_SUMMARY="$(with_dry_prefix "$LOG_SHIPPER_CRON_STATUS")"
@@ -499,10 +525,15 @@ log "  symlink cert-watch     : $CERTWATCH_LINK_STATUS -> $CERTWATCH_TARGET"
 log "  symlink log-shipper    : $LOG_SHIPPER_LINK_STATUS -> $LOG_SHIPPER_TARGET"
 log "  symlink system-janitor : $JANITOR_LINK_STATUS -> $JANITOR_TARGET"
 log "  symlink system-updater : $UPDATER_LINK_STATUS -> $UPDATER_TARGET"
+log "  symlink cron launcher  : $CRON_RUN_LINK_STATUS -> $CRON_RUN_TARGET"
 log "  cron cert-watch        : $CERTWATCH_CRON_SUMMARY"
 log "  cron log-shipper       : $LOG_SHIPPER_CRON_SUMMARY"
 log "  cron system-janitor    : $JANITOR_CRON_SUMMARY"
 log "  cron system-updater    : $UPDATER_CRON_SUMMARY"
+log "  job cert-watch         : $CERTWATCH_JOB"
+log "  job log-shipper        : $LOG_SHIPPER_JOB"
+log "  job system-janitor     : $JANITOR_JOB"
+log "  job system-updater     : $UPDATER_JOB"
 log "  manifest               : $MANIFEST_SUMMARY -> $MANIFEST_PATH"
 
 if [ "$QUIET" -eq 1 ] && [ "$MANIFEST_STATUS" != 'already-current' ]; then

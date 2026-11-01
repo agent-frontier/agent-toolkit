@@ -16,15 +16,19 @@ SMOKE_HARNESSES := \
 	tests/cert-watch-smoke.sh \
 	tests/log-shipper-smoke.sh \
 	tests/install-smoke.sh \
+	tests/cron-smoke.sh \
+	tests/cron-docs-smoke.sh \
 	tests/bootstrap-smoke.sh \
 	tests/capabilities-check.sh
 
-.PHONY: help test smoke lint syntax shellcheck mcp-test demo tour clean-demo-workspaces all
+.PHONY: help check test smoke lint syntax shellcheck mcp-test demo tour clean-demo-workspaces all
 
 help: ## Show this help (default target)
 	@awk 'BEGIN{FS=":.*##"; printf "Targets:\n"} /^[a-zA-Z_-]+:.*##/ {printf "  \033[36m%-22s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 all: lint test ## Run lint + full test suite
+
+check: lint smoke ## Run lint and every Bash smoke harness
 
 test: smoke mcp-test ## Run smoke harnesses + MCP server pytest
 

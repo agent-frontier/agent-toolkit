@@ -21,7 +21,15 @@ Where a recipe parses JSON, prefer the documented contracts over ad-hoc grep.
 
 **Why you'd want this**: this turns the O(1) `last-run.json` snapshot into cheap Prometheus signals so you can alert on silent failure (the tool stopped running, or a section has gone stale) without reparsing the full audit log on every scrape.
 
-**Alternative (no toolkit)**
+**Alternative (standalone writer)**
+
+Prerequisites: `jq`, a completed janitor `last-run.json`, and node-exporter
+configured with a textfile collector at `/var/lib/node_exporter/textfile_collector`.
+The cron user needs write access to that directory; the setup commands below
+require `sudo`. Install/enable node-exporter using your distribution's package
+instructions before using this recipe; `curl` is optional for checking its
+metrics endpoint. Adjust the collector path if your host uses another location.
+For the toolkit exporter instead, see [log-shipper installation](log-shipper-install.md).
 
 Create a tiny textfile-collector writer. It reads
 `~/.local/state/janitor/last-run.json`, converts the canonical janitor fields
@@ -71,8 +79,8 @@ sudo chmod 0755 /usr/local/lib/agent-toolkit/janitor-last-run-prometheus.sh
 Run it after janitor's normal cron:
 
 ```cron
-# Refresh Prometheus textfile after janitor's weekly cron
-22 3 * * 0 /usr/local/lib/agent-toolkit/janitor-last-run-prometheus.sh
+# Refresh Prometheus textfile after janitor's daily cron
+22 3 * * * /usr/local/lib/agent-toolkit/janitor-last-run-prometheus.sh
 ```
 
 Prometheus queries worth keeping around:
@@ -246,11 +254,11 @@ EOF
 chmod 0755 ~/.local/lib/agent-toolkit/janitor-slack-integrity.sh
 ```
 
-Cron it a few minutes after janitor's normal weekly run:
+Cron it a few minutes after janitor's normal daily run:
 
 ```cron
 # Notify Slack if the latest janitor run tripped the safety floor
-26 3 * * 0 SLACK_WEBHOOK_URL='https://hooks.slack.com/services/XXX/YYY/ZZZ' $HOME/.local/lib/agent-toolkit/janitor-slack-integrity.sh
+26 3 * * * SLACK_WEBHOOK_URL='https://hooks.slack.com/services/XXX/YYY/ZZZ' $HOME/.local/lib/agent-toolkit/janitor-slack-integrity.sh
 ```
 
 Interpretation rules: janitor exit code `2` means integrity violation (see [docs/agents/contracts.md](./agents/contracts.md#exit-codes)), and `last-run.json.safety_integrity` carries the final state (`ok`, `violated_missing`, `violated_inode_changed`, etc.) per [docs/audit-trail.md](./audit-trail.md#last-runjson-schema-v02).
@@ -371,7 +379,7 @@ Current `install.sh` writes this shape:
 ```json
 {
   "name": "agent-toolkit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "install_root": "/home/example/agent-toolkit",
   "generated_at": "2026-05-18T19:52:26Z",
   "tools": [

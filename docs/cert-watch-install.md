@@ -12,11 +12,11 @@ cd ~/agent-toolkit
 ```
 
 The installer creates or repairs `~/.local/bin/cert-watch` and installs the
-managed daily cron entry:
+managed hourly cron entry:
 
 ```cron
-# cert-watch — daily TLS certificate inventory (managed by agent-toolkit install.sh)
-42 6 * * * $HOME/.local/bin/cert-watch
+# cert-watch — hourly TLS certificate inventory (managed by agent-toolkit install.sh)
+42 * * * * "$HOME/.local/bin/agent-toolkit-cron" "$HOME/.local/bin/cert-watch"
 ```
 
 ## Optional config

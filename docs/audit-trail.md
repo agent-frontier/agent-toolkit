@@ -51,7 +51,7 @@ section events appear only when the section actually ran.
 | `warn` | Section ran but encountered a non-fatal issue. Detail in `note`. |
 | `dry_run` | The run was a `--dry-run` invocation. Item counts and pre-state are still populated; nothing was modified on disk. |
 | `violated_missing` | A `JANITOR_SAFETY_FLOOR_DIRS` directory disappeared during the run. Run exits `2`. |
-| `violated_inode_changed` | A `JANITOR_SAFETY_FLOOR_DIRS` directory's inode or total byte size changed during the run. Run exits `2`. |
+| `violated_inode_changed` | A `JANITOR_SAFETY_FLOOR_DIRS` directory's inode changed during the run. Run exits `2`; size-only changes are informational. |
 
 Consecutive `idle` events are aggregated into the
 `--report --json` `idle_streaks[]` array (and the human `--report`
@@ -78,6 +78,7 @@ don't want to reparse the full JSONL. It is written atomically
   "ended_at": "2026-05-12T00:59:39+0000",
   "sections": [
     {"name": "docker_prune",        "status": "dry_run", "items": 2,  "freed_bytes": 70881280},
+    {"name": "podman_prune",        "status": "dry_run", "items": 4,  "freed_bytes": 0},
     {"name": "go_build_cache",      "status": "dry_run", "items": 0,  "freed_bytes": 0},
     {"name": "tmp_gobuild_orphans", "status": "dry_run", "items": 16, "freed_bytes": 0},
     {"name": "workspace_binobj",    "status": "dry_run", "items": 0,  "freed_bytes": 0},

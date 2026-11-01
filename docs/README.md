@@ -1,9 +1,11 @@
 # agent-toolkit documentation
 
-This repo hosts two sibling tools sharing the same agent contract:
-`system-janitor` (disk cleanup) and `system-updater` (apt updates).
-Both are cron-driven, dry-run-by-default, and emit the same shape of
-audit-grade machine-readable output. The docs are split into two tracks
+This repo hosts four sibling tools sharing the same agent contract:
+`system-janitor` (disk cleanup), `system-updater` (apt updates),
+`cert-watch` (TLS expiry), and `log-shipper` (audit export).
+All are cron-driven and emit audit-grade machine-readable output.
+Janitor performs configured cleanup unless `--dry-run` is passed; updater
+previews by default and requires explicit `--apply` for changes. The docs are split into two tracks
 per tool: a friendly human track for operators who install and configure
 them, and a precise agent track for autonomous LLM agents that drive
 them as tools. The two tracks share one reference doc —
@@ -28,6 +30,14 @@ on-disk shape is documented in
 | [updater-install.md](./updater-install.md) | Install steps, cron scheduling (dry-run nightly), `--apply` requires root |
 | [updater-configuration.md](./updater-configuration.md) | `UPDATER_*` environment variables, holds, security-only, maintenance window |
 | [updater-usage.md](./updater-usage.md) | Manual operations: dry-run preview, `--apply`, `--report`, `--health`, common workflows |
+
+## For humans — monitoring and export
+
+| Doc | What's in it |
+|---|---|
+| [cert-watch-install.md](./cert-watch-install.md) | Hourly certificate checks, target configuration and verification |
+| [log-shipper-install.md](./log-shipper-install.md) | Quarter-hour audit export, output configuration and verification |
+| [cron-troubleshooting.md](./cron-troubleshooting.md) | All four schedules, launcher status, startup failures and stale runs |
 
 ## For autonomous agents
 

@@ -24,17 +24,18 @@ Useful when you want to free a specific toolchain's cache without waiting
 for the full sweep.
 
 ```bash
-# Just Docker
-system-janitor --only docker_prune
+# Preview unused Podman image pruning (containers and volumes are preserved)
+system-janitor --only podman_prune --dry-run
 
 # Multiple sections (comma-separated, no spaces)
-system-janitor --only docker_prune,go_build_cache --dry-run
+system-janitor --only docker_prune,podman_prune,go_build_cache --dry-run
 ```
 
 Notes:
 
-- Valid names: `docker_prune`, `go_build_cache`, `tmp_gobuild_orphans`,
-  `workspace_binobj`, `extra_cleanup`, `aged_logs`, `nuget_http_temp`.
+- Valid names: `docker_prune`, `podman_prune`, `go_build_cache`,
+  `tmp_gobuild_orphans`, `workspace_binobj`, `extra_cleanup`, `aged_logs`,
+  `nuget_http_temp`.
 - Execution order follows the **script's declaration order**, not the
   order you list them on the command line.
 - `--only` composes with `--dry-run` and with the `JANITOR_*` config
@@ -84,7 +85,7 @@ historical issues via `--health-acknowledge`.
 
 ```bash
 system-janitor --version
-# → system-janitor 0.1.0
+# → system-janitor 0.2.0
 ```
 
 `--version --json` is the agent-facing feature-detection surface — see

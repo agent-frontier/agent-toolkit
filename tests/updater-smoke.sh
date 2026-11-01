@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # tests/updater-smoke.sh — hermetic smoke test for system-updater.sh.
 #
-# Exercises the v0.1.0 contract against the stub backend. No root, no real
+# Exercises the v0.2.0 contract against the stub backend. No root, no real
 # apt, no network. Each stage gets its own mktemp -d UPDATER_LOG_DIR so
 # stages cannot pollute each other; everything is torn down on EXIT.
 #
@@ -70,9 +70,9 @@ W=$(new_workdir)
 
 # --version must work without UPDATER_LOG_DIR set.
 ( unset UPDATER_LOG_DIR; "$SCRIPT" --version > "${W}/v.out" )
-grep -Eq '^system-updater 0\.1\.0$' "${W}/v.out" \
-  || fail "--version stdout did not match '^system-updater 0\\.1\\.0$': $(cat "${W}/v.out")"
-pass "--version exits 0 and prints exactly 'system-updater 0.1.0'"
+grep -Eq '^system-updater 0\.2\.0$' "${W}/v.out" \
+  || fail "--version stdout did not match '^system-updater 0\\.2\\.0$': $(cat "${W}/v.out")"
+pass "--version exits 0 and prints exactly 'system-updater 0.2.0'"
 
 ( unset UPDATER_LOG_DIR; "$SCRIPT" --version --json > "${W}/v.json" )
 python3 - "${W}/v.json" <<'PY' || fail "--version --json failed contract checks"
@@ -545,8 +545,8 @@ for cap in "${CLAIMED[@]}"; do
       ;;
     version-json)
       ( unset UPDATER_LOG_DIR; "$SCRIPT" --version --json > "${P}/v.json" ) || probe_fail "$cap" "exit"
-      python3 -c "import json; d=json.load(open('${P}/v.json')); assert d['version']=='0.1.0'" \
-        || probe_fail "$cap" "version field not 0.1.0"
+      python3 -c "import json; d=json.load(open('${P}/v.json')); assert d['version']=='0.2.0'" \
+        || probe_fail "$cap" "version field not 0.2.0"
       ;;
     report)
       run_updater "$P" >/dev/null

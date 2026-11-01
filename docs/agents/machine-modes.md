@@ -129,12 +129,12 @@ Capability discovery surface. Read-only; requires no state (not even `HOME`).
 ```json
 {
   "name": "system-janitor",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "capabilities": [
     "aged-logs", "doctor", "doctor-json", "extra-cleanup-globs",
     "health", "health-acknowledge", "health-json", "idle-status",
-    "json-schemas", "last-run-sections", "only", "report",
-    "report-bytes", "report-json", "schema-aliases",
+    "json-schemas", "last-run-sections", "only", "podman-prune",
+    "report", "report-bytes", "report-json", "schema-aliases",
     "toolkit-manifest", "version", "version-json"
   ],
   "toolkit": {
@@ -154,7 +154,7 @@ discover its siblings from the same payload. See
 
 Filter for sections to run. Synonyms.
 
-- Invocation: `system-janitor --only docker_prune,go_build_cache`.
+- Invocation: `system-janitor --only docker_prune,podman_prune,go_build_cache`.
 - Composes with: every machine mode above (filters `per_section` in `--report`, filters which sections execute in a normal run, filters `sections[]` in `last-run.json`).
 - Execution order follows `KNOWN_SECTIONS` declaration order, NOT argv order. Behavior is deterministic regardless of how the user lists names.
 - Unknown section names exit `3` BEFORE the lock is taken.
@@ -184,6 +184,7 @@ Mapping (capability string → feature):
 | `last-run-sections` | `last-run.json.sections[]` present |
 | `json-schemas` | `schemas/*.schema.json` ship with the repo |
 | `schema-aliases` | `SECTION_ALIASES` remap applied before obsolete filter |
+| `podman-prune` | `podman image prune --all --force`, limited to images not used by any container |
 | `toolkit-manifest` | top-level `toolkit` object in `--version --json` advertises the toolkit name, repo, and sibling tools |
 | `only` | `--only` / `--sections` flag |
 | `version` | `--version` (text) |

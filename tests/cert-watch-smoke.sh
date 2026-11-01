@@ -115,7 +115,7 @@ fi
 
 section "─── 02: --version ───────────────────────────────────────────"
 "$SCRIPT" --version > "$WORK/version.out"
-grep -Eq '^cert-watch 0\.1\.0$' "$WORK/version.out" || fail "--version output mismatch: $(cat "$WORK/version.out")"
+grep -Eq '^cert-watch 0\.2\.0$' "$WORK/version.out" || fail "--version output mismatch: $(cat "$WORK/version.out")"
 pass "--version exits 0 and prints exact banner"
 "$SCRIPT" --version --json > "$WORK/version.json"
 python3 - "$WORK/version.json" <<'PY' || fail "--version --json contract failed"
@@ -314,7 +314,7 @@ for cap in "${EXPECTED_CAPS[@]}"; do
     schemas) [ -f "$REPO_ROOT/schemas/cert-watch-report.schema.json" ] || fail "$cap probe missing" ;;
     sections) [ -f "$SECTIONS_LOG/cert-watch.jsonl" ] || fail "$cap probe missing" ;;
     toolkit-manifest) grep -q 'system-updater' "$WORK/version.json" || fail "$cap probe missing" ;;
-    version) grep -q '^cert-watch 0\.1\.0$' "$WORK/version.out" || fail "$cap probe missing" ;;
+    version) grep -q '^cert-watch 0\.2\.0$' "$WORK/version.out" || fail "$cap probe missing" ;;
     version-json) [ -f "$WORK/version.json" ] || fail "$cap probe missing" ;;
     *) fail "unexpected capability $cap" ;;
   esac

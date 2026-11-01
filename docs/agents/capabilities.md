@@ -61,6 +61,7 @@ tables below summarize for humans. Both must move together.
     "json-schemas",
     "last-run-sections",
     "only",
+    "podman-prune",
     "report",
     "report-bytes",
     "report-json",
@@ -141,6 +142,7 @@ can rely on identical contracts; any divergence is a bug.
 | `idle-status` | Sections that ran but found nothing to clean emit JSONL events with `status: "idle"` instead of being silently skipped, so agents can prove the section *ran* vs *was unconfigured*. |
 | `json-schemas` | Formal Draft 2020-12 JSON Schemas exist for `--report --json` and `--health --json` under `schemas/`. |
 | `last-run-sections` | `last-run.json` includes a `sections[]` array with per-section `{name, status, freed_bytes, ...}`. |
+| `podman-prune` | The janitor can prune Podman images not used by any container; it does not prune containers or volumes. |
 | `report-bytes` | `--report --json` and `last-run.json` use `freed_bytes` (integer) as the canonical aggregation unit; JSONL events still emit legacy `freed_kb` per the unit canon in `docs/agents/contracts.md`. |
 | `schema-aliases` | The script recognizes `SECTION_ALIASES` for renamed sections and `OBSOLETE_SECTIONS` for removed ones, so config files and historical JSONL replay forward-compatibly. |
 

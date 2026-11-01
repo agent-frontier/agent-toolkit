@@ -10,11 +10,11 @@ cd ~/agent-toolkit
 ./install.sh
 ```
 
-The installer creates or repairs `~/.local/bin/log-shipper` and installs the managed hourly cron entry:
+The installer creates or repairs `~/.local/bin/log-shipper` and installs the managed quarter-hourly cron entry:
 
 ```cron
-# log-shipper — hourly audit-trail export (managed by agent-toolkit install.sh)
-7 * * * * $HOME/.local/bin/log-shipper
+# log-shipper — quarter-hourly audit-trail export (managed by agent-toolkit install.sh)
+7,22,37,52 * * * * "$HOME/.local/bin/agent-toolkit-cron" "$HOME/.local/bin/log-shipper"
 ```
 
 ## Optional config

@@ -33,7 +33,7 @@ set -uo pipefail
 # do_version() below is the authoritative feature-detection surface for
 # autonomous agents — they should query `--version --json` and check
 # `capabilities` rather than parsing `--help`.
-readonly VERSION="0.1.0"
+readonly VERSION="0.2.0"
 readonly TOOLKIT_NAME="agent-toolkit"
 readonly TOOLKIT_REPO="https://github.com/agent-frontier/agent-toolkit"
 readonly -a TOOLKIT_TOOLS=(cert-watch log-shipper system-janitor system-updater)
@@ -123,7 +123,7 @@ done
 # KNOWN_SECTIONS is the source of truth for both --only validation AND the
 # order of execution (the run_section dispatch lines below MUST iterate or
 # match this order). When adding a new action section, add it here.
-KNOWN_SECTIONS=(docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp)
+KNOWN_SECTIONS=(docker_prune podman_prune go_build_cache tmp_gobuild_orphans workspace_binobj extra_cleanup aged_logs nuget_http_temp)
 
 # Validate --only BEFORE flock / log redirect: invalid input is a precondition
 # failure (exit 3) and the error message belongs on the user's stderr, not
@@ -192,9 +192,9 @@ FLAGS:
   --only <list>     Run ONLY the named section(s); skip all others
                     silently (no JSONL event for skipped sections).
                     <list> is comma-separated, no spaces. Valid names:
-                    docker_prune, go_build_cache, tmp_gobuild_orphans,
-                    workspace_binobj, extra_cleanup, aged_logs,
-                    nuget_http_temp.
+                    docker_prune, podman_prune, go_build_cache,
+                    tmp_gobuild_orphans, workspace_binobj, extra_cleanup,
+                    aged_logs, nuget_http_temp.
                     Execution order follows the script's declaration
                     order, NOT the order given on the command line.
                     run_start, run_end, and safety_integrity always run.
@@ -287,6 +287,7 @@ CONFIG (sourced as bash):
                                  must NOT change during the run
   JANITOR_DOCKER_PRUNE           yes/no (default: yes if docker present)
   JANITOR_DOCKER_VOLUMES         yes/no (default: yes; passes --volumes)
+  JANITOR_PODMAN_PRUNE           yes/no (default: yes; unused images only, no volumes)
   JANITOR_GO_CLEAN               yes/no (default: yes if go present)
   JANITOR_TMP_GOBUILD_ORPHANS    yes/no (default: yes)
   JANITOR_NUGET_CLEAN            yes/no (default: yes if dotnet present)
@@ -295,14 +296,15 @@ CONFIG (sourced as bash):
                                  (default: $XDG_STATE_HOME/janitor)
 
 EXAMPLES:
-  # Cron entry — Sunday 03:17 weekly:
-  17 3 * * 0 $HOME/.local/bin/system-janitor
+  # Managed cron entry — daily 03:17 (install.sh writes absolute paths):
+  17 3 * * * "$HOME/.local/bin/agent-toolkit-cron" "$HOME/.local/bin/system-janitor"
 
   # Dry-run preview:
   system-janitor --dry-run
 
-  # Targeted cleanup (agent idiom): only run Docker prune
+  # Targeted cleanup (agent idiom): preview Docker or Podman pruning
   system-janitor --only docker_prune --dry-run
+  system-janitor --only podman_prune --dry-run
   system-janitor --only docker_prune,go_build_cache
 
   # Machine-readable run summary (preferred by agents over parsing logs):
@@ -390,6 +392,7 @@ JANITOR_AGED_LOG_DAYS="${JANITOR_AGED_LOG_DAYS:-7}"
 JANITOR_SAFETY_FLOOR_DIRS="${JANITOR_SAFETY_FLOOR_DIRS:-}"
 JANITOR_DOCKER_PRUNE="${JANITOR_DOCKER_PRUNE:-yes}"
 JANITOR_DOCKER_VOLUMES="${JANITOR_DOCKER_VOLUMES:-yes}"
+JANITOR_PODMAN_PRUNE="${JANITOR_PODMAN_PRUNE:-yes}"
 JANITOR_GO_CLEAN="${JANITOR_GO_CLEAN:-yes}"
 JANITOR_TMP_GOBUILD_ORPHANS="${JANITOR_TMP_GOBUILD_ORPHANS:-yes}"
 JANITOR_NUGET_CLEAN="${JANITOR_NUGET_CLEAN:-yes}"
@@ -885,6 +888,7 @@ print(json.dumps({
         "json-schemas",
         "last-run-sections",
         "only",
+        "podman-prune",
         "report",
         "report-bytes",
         "report-json",
@@ -1705,10 +1709,19 @@ section() { echo; echo "── $* ── $(ts)"; }
 # downgraded from status="ok" to status="idle" so an autonomous agent
 # watching the audit trail can detect a stale config without aggregating
 # all historical events itself. Default sections (docker_prune,
-# go_build_cache, tmp_gobuild_orphans, nuget_http_temp) legitimately have
+# podman_prune, go_build_cache, tmp_gobuild_orphans, nuget_http_temp) legitimately have
 # nothing to do on a clean host and stay status="ok"; do not add them here.
 # When introducing a new opt-in section, add its name to this array.
 OPTIN_SECTIONS=("workspace_binobj" "extra_cleanup" "aged_logs")
+
+_optin_section_configured() {
+  case "$1" in
+    workspace_binobj) [ -n "$JANITOR_WORKSPACE_DIRS" ] ;;
+    extra_cleanup)    [ -n "$JANITOR_EXTRA_CLEANUP_DIRS" ] ;;
+    aged_logs)        [ -n "$JANITOR_AGED_LOG_DIRS" ] ;;
+    *)                return 1 ;;
+  esac
+}
 
 run_section() {
   local name="$1"; shift
@@ -1753,7 +1766,8 @@ run_section() {
   # run. This is the silent-failure detector required by the north star:
   # an opt-in section configured against a stale path will accumulate
   # status="idle" events that --report --json surfaces via idle_streaks.
-  if [ "$status" = "ok" ] && [ "$items" = "0" ] && [ "$freed" = "0" ]; then
+  if [ "$status" = "ok" ] && [ "$items" = "0" ] && [ "$freed" = "0" ] \
+      && _optin_section_configured "$name"; then
     local s
     for s in "${OPTIN_SECTIONS[@]}"; do
       if [ "$s" = "$name" ]; then
@@ -1777,6 +1791,15 @@ act_docker_prune() {
   else
     docker system prune -af | tail -10
   fi
+}
+
+act_podman_prune() {
+  [ "$JANITOR_PODMAN_PRUNE" = "yes" ] || { echo "[skip] disabled by config"; return 0; }
+  command -v podman >/dev/null 2>&1 || { echo "[skip] podman not installed"; return 0; }
+  podman info >/dev/null 2>&1 || { echo "[skip] podman unavailable"; return 0; }
+  # Remove images not used by any container, including tagged build images.
+  # Do not prune containers or volumes: volumes can hold persistent user data.
+  podman image prune --all --force 2>&1 | tail -10
 }
 
 act_go_clean() {
@@ -1857,7 +1880,8 @@ act_nuget_caches() {
 }
 
 # ── Item-count expressions ─────────────────────────────────────────────
-count_docker_images() { echo 'docker images -aq 2>/dev/null'; }
+count_docker_images()  { echo 'docker images -aq 2>/dev/null'; }
+count_podman_images()  { echo "podman images --no-trunc --format '{{.ID}} {{.Containers}}' 2>/dev/null | awk '\$2 == 0 {print \$1}' | sort -u"; }
 count_tmp_gobuild()   { echo 'ls -1d /tmp/go-build* /tmp/gopath 2>/dev/null'; }
 count_workspace_binobj() {
   [ -n "$JANITOR_WORKSPACE_DIRS" ] || { echo ""; return; }
@@ -1914,6 +1938,7 @@ emit_event "run_start" "ok" 0 0 "config=${CONFIG_LOADED:-defaults} dry_run=$DRY_
 
 # ── Sections ───────────────────────────────────────────────────────────
 run_section "docker_prune"        "$(count_docker_images)"      act_docker_prune
+run_section "podman_prune"        "$(count_podman_images)"      act_podman_prune
 run_section "go_build_cache"      ""                            act_go_clean
 run_section "tmp_gobuild_orphans" "$(count_tmp_gobuild)"        act_tmp_gobuild
 run_section "workspace_binobj"    "$(count_workspace_binobj)"   act_workspace_binobj

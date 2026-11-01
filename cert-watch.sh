@@ -17,7 +17,7 @@
 set -uo pipefail
 
 # ── Version ────────────────────────────────────────────────────────────
-readonly VERSION="0.1.0"
+readonly VERSION="0.2.0"
 readonly TOOLKIT_NAME="agent-toolkit"
 readonly TOOLKIT_REPO="https://github.com/agent-frontier/agent-toolkit"
 readonly -a TOOLKIT_TOOLS=(cert-watch log-shipper system-janitor system-updater)
@@ -223,8 +223,8 @@ EXIT CODES:
   5   --health/--doctor: unknown (foundational signal missing)
 
 EXAMPLES:
-  # Daily cron inventory (installer default: 06:42 daily)
-  42 6 * * * $HOME/.local/bin/cert-watch
+  # Hourly cron inventory (installer default: minute 42)
+  42 * * * * "$HOME/.local/bin/agent-toolkit-cron" "$HOME/.local/bin/cert-watch"
 
   # One-shot local scan
   CERT_WATCH_PATHS="$HOME/certs/*.crt" cert-watch

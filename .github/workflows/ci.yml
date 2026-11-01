@@ -18,8 +18,10 @@ jobs:
 
       - name: bash -n (syntax check)
         run: |
-          bash -n system-janitor.sh
-          if [ -f system-updater.sh ]; then bash -n system-updater.sh; fi
+          for f in system-janitor.sh system-updater.sh cert-watch.sh log-shipper.sh install.sh scripts/*.sh tests/*.sh demos/*.sh; do
+            [ -f "$f" ] || continue
+            bash -n "$f"
+          done
 
       - name: shellcheck
         uses: ludeeus/action-shellcheck@2.0.0
@@ -29,6 +31,9 @@ jobs:
           additional_files: |
             system-janitor.sh
             system-updater.sh
+            cert-watch.sh
+            log-shipper.sh
+            install.sh
 
   smoke:
     name: dry-run smoke test
@@ -43,6 +48,18 @@ jobs:
         if: hashFiles('system-updater.sh') != ''
         run: ./tests/updater-smoke.sh
 
+      - name: Run cert-watch and log-shipper smoke tests
+        run: |
+          ./tests/cert-watch-smoke.sh
+          ./tests/log-shipper-smoke.sh
+
       - name: Run capabilities registry check
         if: hashFiles('docs/agents/capabilities.md') != ''
         run: ./tests/capabilities-check.sh
+
+      - name: Run cron and installer smoke tests
+        run: |
+          ./tests/cron-smoke.sh
+          ./tests/cron-docs-smoke.sh
+          ./tests/install-smoke.sh
+          ./tests/bootstrap-smoke.sh

@@ -589,8 +589,9 @@ echo "─── opt-in idle requires configured path ───"
 # Unconfigured opt-in paths are not an idle signal: those sections were not
 # opted into and therefore have no meaningful "nothing to clean" result.
 # Conversely, a configured path with no matching work is a real idle run.
-# Exercise all three opt-in sections against unset, explicitly-empty, and
-# configured-empty paths in isolated runs so one case cannot affect another.
+# Exercise all three opt-in sections against unset, explicitly-empty,
+# configured-empty, and configured-missing targets in isolated runs so one case
+# cannot affect another.
 IDLE_CONFIG_WORK="${WORK2}/idle-config"
 mkdir -p "$IDLE_CONFIG_WORK"
 IDLE_SECTIONS=(workspace_binobj extra_cleanup aged_logs)
@@ -598,7 +599,7 @@ IDLE_VARS=(JANITOR_WORKSPACE_DIRS JANITOR_EXTRA_CLEANUP_DIRS JANITOR_AGED_LOG_DI
 for i in "${!IDLE_SECTIONS[@]}"; do
   idle_section="${IDLE_SECTIONS[$i]}"
   idle_var="${IDLE_VARS[$i]}"
-  for state in unset empty configured; do
+  for state in unset empty configured missing; do
     case_work="${IDLE_CONFIG_WORK}/${idle_section}-${state}"
     mkdir -p "${case_work}/state"
     cfg="${case_work}/config"
@@ -613,19 +614,36 @@ EOF
       empty)
         printf '%s=""\n' "$idle_var" >> "$cfg"
         ;;
-      configured)
+      configured|missing)
         case "$idle_section" in
           workspace_binobj)
-            mkdir -p "${case_work}/workspace"
-            printf '%s="%s"\n' "$idle_var" "${case_work}/workspace" >> "$cfg"
+            if [ "$state" = missing ]; then
+              printf '%s="%s"\n' "$idle_var" "${case_work}/absent-workspace" >> "$cfg"
+            else
+              mkdir -p "${case_work}/workspace"
+              printf '%s="%s"\n' "$idle_var" "${case_work}/workspace" >> "$cfg"
+            fi
             ;;
           extra_cleanup)
-            # A configured path that does not exist yields a successful no-op.
-            printf '%s="%s"\n' "$idle_var" "${case_work}/absent-target" >> "$cfg"
+            if [ "$state" = missing ]; then
+              # A configured literal target that is absent is still an explicit
+              # no-work result and should be counted as idle.
+              printf '%s="%s"\n' "$idle_var" "${case_work}/absent-target" >> "$cfg"
+            elif [ "$state" = configured ]; then
+              # An unmatched configured glob is an explicit no-work target.
+              printf '%s="%s"\n' "$idle_var" "${case_work}/empty-glob-*" >> "$cfg"
+            else
+              mkdir -p "${case_work}/target"
+              printf '%s="%s"\n' "$idle_var" "${case_work}/target" >> "$cfg"
+            fi
             ;;
           aged_logs)
-            mkdir -p "${case_work}/logs"
-            printf '%s="%s"\n' "$idle_var" "${case_work}/logs" >> "$cfg"
+            if [ "$state" = missing ]; then
+              printf '%s="%s"\n' "$idle_var" "${case_work}/absent-logs" >> "$cfg"
+            else
+              mkdir -p "${case_work}/logs"
+              printf '%s="%s"\n' "$idle_var" "${case_work}/logs" >> "$cfg"
+            fi
             ;;
         esac
         ;;
@@ -644,7 +662,7 @@ with open(path) as fh:
     events = [json.loads(line) for line in fh if line.strip()]
 matched = [event for event in events if event.get("section") == section]
 assert len(matched) == 1, f"expected one {section} event, got {matched!r}"
-expected = "idle" if state == "configured" else "ok"
+expected = "idle" if state in ("configured", "missing") else "ok"
 assert matched[0].get("status") == expected, (
     f"{section} with {state} path: expected {expected}, got {matched[0]!r}"
 )
@@ -665,7 +683,7 @@ report = subprocess.check_output(
 data = json.loads(report)
 sections = [entry for entry in data.get("idle_streaks", [])
             if entry.get("section") == section]
-expected_count = 1 if state == "configured" else 0
+expected_count = 1 if state in ("configured", "missing") else 0
 assert len(sections) == expected_count, (
     f"{section} with {state} path: expected {expected_count} idle_streak entries, "
     f"got {sections!r}"
@@ -673,11 +691,141 @@ assert len(sections) == expected_count, (
 if sections:
     assert sections[0].get("consecutive_idle_runs") == 2, sections[0]
 PY
-    if [ "$state" = configured ]; then expected=idle; else expected=ok; fi
+    if [ "$state" = configured ] || [ "$state" = missing ]; then expected=idle; else expected=ok; fi
     pass "$idle_section: $state path -> $expected"
   done
 done
 rm -rf "$IDLE_CONFIG_WORK"
+
+# Configuring one opt-in knob must not make a different, unconfigured section
+# look opted-in. These isolated runs deliberately leave one sibling knob set
+# in the process environment while invoking only the target section. This
+# guards the per-section association (rather than a global "any opt-in set"
+# check) and exercises all six ordered pairs.
+echo "─── opt-in idle configuration is section-specific ───"
+CROSS_CONFIG_WORK="${WORK2}/cross-optin-config"
+mkdir -p "$CROSS_CONFIG_WORK"
+for target_index in "${!IDLE_SECTIONS[@]}"; do
+  target_section="${IDLE_SECTIONS[$target_index]}"
+  target_var="${IDLE_VARS[$target_index]}"
+  for sibling_index in "${!IDLE_SECTIONS[@]}"; do
+    [ "$target_index" -ne "$sibling_index" ] || continue
+    sibling_section="${IDLE_SECTIONS[$sibling_index]}"
+    sibling_var="${IDLE_VARS[$sibling_index]}"
+    case_work="${CROSS_CONFIG_WORK}/${target_section}-with-${sibling_section}"
+    mkdir -p "${case_work}/state" "${case_work}/sibling-path"
+    cfg="${case_work}/config"
+    cat > "$cfg" <<'EOF'
+JANITOR_DOCKER_PRUNE=no
+JANITOR_PODMAN_PRUNE=no
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_NUGET_CLEAN=no
+EOF
+    env -u JANITOR_WORKSPACE_DIRS -u JANITOR_EXTRA_CLEANUP_DIRS \
+      -u JANITOR_AGED_LOG_DIRS "${sibling_var}=${case_work}/sibling-path" \
+      PATH="$IDLE_TEST_PATH" JANITOR_LOG_DIR="${case_work}/state" \
+      "$SCRIPT" --config "$cfg" --only "$target_section" >/dev/null
+    python3 - "${case_work}/state/janitor.jsonl" "$target_section" "$target_var" "$sibling_var" <<'PY' \
+      || fail "$target_section became idle because only $sibling_section was configured"
+import json, sys
+path, target, target_var, sibling_var = sys.argv[1:]
+with open(path, encoding="utf-8") as fh:
+    events = [json.loads(line) for line in fh if line.strip()]
+matched = [event for event in events if event.get("section") == target]
+assert len(matched) == 1, matched
+assert matched[0].get("status") == "ok", (
+    f"{target} ({target_var}) must stay unconfigured when only {sibling_var} is set: "
+    f"{matched[0]!r}"
+)
+PY
+    pass "$target_section stays unconfigured when only $sibling_section is configured"
+  done
+done
+rm -rf "$CROSS_CONFIG_WORK"
+
+# Dry runs are not evidence that a configured path is stale: the action was
+# deliberately not executed. Exercise unset, empty, configured-empty and
+# configured-missing path states for every opt-in section; keep public events
+# and report contracts stable.
+echo "─── opt-in dry runs never become idle ───"
+DRY_IDLE_WORK="${WORK2}/dry-idle-config"
+mkdir -p "$DRY_IDLE_WORK"
+for i in "${!IDLE_SECTIONS[@]}"; do
+  idle_section="${IDLE_SECTIONS[$i]}"
+  idle_var="${IDLE_VARS[$i]}"
+  for state in unset empty configured missing; do
+    case_work="${DRY_IDLE_WORK}/${idle_section}-${state}"
+    mkdir -p "${case_work}/state"
+    cfg="${case_work}/config"
+    cat > "$cfg" <<EOF
+JANITOR_DOCKER_PRUNE=no
+JANITOR_PODMAN_PRUNE=no
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_NUGET_CLEAN=no
+EOF
+    case "$state" in
+      empty) printf '%s=""\n' "$idle_var" >> "$cfg" ;;
+      configured|missing)
+        case "$idle_section" in
+          workspace_binobj)
+            if [ "$state" = missing ]; then
+              printf '%s="%s"\n' "$idle_var" "${case_work}/absent-workspace" >> "$cfg"
+            else
+              mkdir -p "${case_work}/workspace"
+              printf '%s="%s"\n' "$idle_var" "${case_work}/workspace" >> "$cfg"
+            fi
+            ;;
+          extra_cleanup)
+            if [ "$state" = missing ]; then
+              printf '%s="%s"\n' "$idle_var" "${case_work}/absent-target" >> "$cfg"
+            else
+              mkdir -p "${case_work}/target"
+              printf '%s="%s"\n' "$idle_var" "${case_work}/target" >> "$cfg"
+            fi
+            ;;
+          aged_logs)
+            if [ "$state" = missing ]; then
+              printf '%s="%s"\n' "$idle_var" "${case_work}/absent-logs" >> "$cfg"
+            else
+              mkdir -p "${case_work}/logs"
+              printf '%s="%s"\n' "$idle_var" "${case_work}/logs" >> "$cfg"
+            fi
+            ;;
+        esac
+        ;;
+    esac
+
+    env -u JANITOR_WORKSPACE_DIRS -u JANITOR_EXTRA_CLEANUP_DIRS \
+      -u JANITOR_AGED_LOG_DIRS PATH="$IDLE_TEST_PATH" \
+      JANITOR_LOG_DIR="${case_work}/state" \
+      "$SCRIPT" --dry-run --config "$cfg" --only "$idle_section" >/dev/null
+    python3 - "${case_work}/state/janitor.jsonl" "$idle_section" <<'PY' \
+      || fail "${idle_section} (${state} path) dry-run emitted a non-dry-run status"
+import json, sys
+path, section = sys.argv[1:]
+with open(path) as fh:
+    events = [json.loads(line) for line in fh if line.strip()]
+matched = [event for event in events if event.get("section") == section]
+assert len(matched) == 1, f"expected one {section} event, got {matched!r}"
+assert matched[0].get("status") == "dry_run", matched[0]
+PY
+    python3 - "${case_work}/state" "$SCRIPT" <<'PY' \
+      || fail "${idle_section} (${state} path) dry-run appeared in idle report"
+import json, os, subprocess, sys
+log_dir, script = sys.argv[1:]
+report = subprocess.check_output(
+    [script, "--report", "--json"],
+    env={**os.environ, "JANITOR_LOG_DIR": log_dir}, text=True,
+)
+data = json.loads(report)
+assert data.get("idle_streaks") == [], data.get("idle_streaks")
+PY
+    pass "$idle_section: $state path dry-run -> dry_run"
+  done
+done
+rm -rf "$DRY_IDLE_WORK"
 
 # A configured opt-in section with real work is productive, not idle. Recreate
 # the work before each isolated run so both consecutive events have items > 0;
@@ -952,6 +1100,60 @@ assert len(check) == 1 and check[0]["ok"] is True, check
 assert "max consecutive_idle=0" in (check[0]["detail"] or ""), check
 PY
 pass "case 5b: default status=ok no-op runs do not degrade health"
+
+# Exercise the false-idle fix through the complete public health path, not
+# just synthetic JSONL. Five real runs are enough to cross the health
+# degradation threshold if an unset opt-in section is incorrectly promoted
+# to status=idle. Keep each section's history isolated and clear inherited
+# configuration so the result does not depend on the caller's environment.
+H_UNCONFIGURED_OPTINS="${HEALTH_WORK}/unconfigured_optins"
+mkdir -p "$H_UNCONFIGURED_OPTINS"
+for section in workspace_binobj extra_cleanup aged_logs; do
+  state_dir="${H_UNCONFIGURED_OPTINS}/${section}"
+  cfg="${state_dir}.cfg"
+  mkdir -p "$state_dir"
+  cat > "$cfg" <<'EOF'
+JANITOR_DOCKER_PRUNE=no
+JANITOR_PODMAN_PRUNE=no
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_NUGET_CLEAN=no
+EOF
+  for _ in 1 2 3 4 5; do
+    env -u JANITOR_WORKSPACE_DIRS -u JANITOR_EXTRA_CLEANUP_DIRS \
+      -u JANITOR_AGED_LOG_DIRS JANITOR_LOG_DIR="$state_dir" \
+      "$SCRIPT" --config "$cfg" --only "$section" >/dev/null
+  done
+
+  python3 - "$state_dir" "$section" "$SCRIPT" <<'PY' \
+    || fail "$section unset opt-in runs degraded health"
+import json, os, subprocess, sys
+log_dir, section, script = sys.argv[1:]
+with open(os.path.join(log_dir, "janitor.jsonl"), encoding="utf-8") as fh:
+    events = [json.loads(line) for line in fh if line.strip()]
+section_events = [event for event in events if event.get("section") == section]
+assert len(section_events) == 5, section_events
+assert all(event.get("status") == "ok" for event in section_events), section_events
+report = json.loads(subprocess.check_output(
+    [script, "--report", "--json"],
+    env={**os.environ, "JANITOR_LOG_DIR": log_dir}, text=True,
+))
+assert report.get("idle_streaks") == [], report.get("idle_streaks")
+health = subprocess.run(
+    [script, "--health", "--json"],
+    env={**os.environ, "JANITOR_LOG_DIR": log_dir}, text=True,
+    stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+)
+assert health.returncode == 0, (health.returncode, health.stdout, health.stderr)
+health_data = json.loads(health.stdout)
+assert health_data.get("status") == "healthy", health_data
+checks = [check for check in health_data["checks"]
+          if check.get("name") == "no_long_idle_streaks"]
+assert len(checks) == 1 and checks[0].get("ok") is True, checks
+assert "max consecutive_idle=0" in (checks[0].get("detail") or ""), checks
+PY
+  pass "case 5c: five unconfigured $section runs keep report and health clean"
+done
 
 # Case 6: --json without --health/--report exits 3.
 # (Already partially covered above for --report; here we ensure the new

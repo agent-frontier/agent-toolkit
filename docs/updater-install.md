@@ -33,7 +33,7 @@ its managed daily cron entry alongside `system-janitor`. Make sure
 
 ```bash
 system-updater --version
-# → system-updater 0.1.0
+# → system-updater 0.2.0
 ```
 
 ## Optional: install a config file
@@ -63,7 +63,7 @@ the roadmap in [CHANGELOG.md](CHANGELOG.md)).
 
 ```cron
 # system-updater — daily apt update sweep (managed by agent-toolkit install.sh)
-23 4 * * * $HOME/.local/bin/system-updater
+23 4 * * * "$HOME/.local/bin/agent-toolkit-cron" "$HOME/.local/bin/system-updater"
 ```
 
 Apply manually after reviewing the preview:

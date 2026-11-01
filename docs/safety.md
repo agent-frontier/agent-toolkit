@@ -12,8 +12,9 @@ convention.
 
 - **Safety-floor integrity check.** Any directory listed in
   `JANITOR_SAFETY_FLOOR_DIRS` is inode-and-byte-snapshotted before the
-  run and verified after. Any inode change, total-byte-size change, or
-  disappearance causes the run to exit `2` and log `user.err` to syslog.
+  run and verified after. An inode change or disappearance causes the run
+  to exit `2` and log `user.err` to syslog. Size-only changes are informational:
+  log directories legitimately grow while the tool writes its audit trail.
   This is the mechanism by which you declare "these paths are off-limits
   to this tool" — your home `src/` tree, dotfile dirs, etc.
 
@@ -59,7 +60,7 @@ convention.
 
 ## How they compose for a typical cron schedule
 
-A weekly cron entry on a host with `JANITOR_SAFETY_FLOOR_DIRS` set to
+A daily cron entry on a host with `JANITOR_SAFETY_FLOOR_DIRS` set to
 your important source trees gets you:
 
 1. At most one run executing at a time (`flock`).

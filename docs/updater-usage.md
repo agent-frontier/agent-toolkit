@@ -89,7 +89,13 @@ To clear historical issues without rewriting the append-only log, use
 
 ## Common workflows
 
-**Nightly preview, weekly apply:**
+**Optional manually managed schedule: nightly preview, weekly apply.**
+
+This is not the installer default: `install.sh` schedules only a daily 04:23
+preview through `agent-toolkit-cron`, which never applies updates. The custom
+schedule below requires explicit operator approval and sudo configuration;
+reinstalling replaces matching user-cron entries with the managed defaults.
+No apply job is created by the installer.
 
 ```cron
 23 2 * * *   $HOME/.local/bin/system-updater --dry-run

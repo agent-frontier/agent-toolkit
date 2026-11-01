@@ -100,7 +100,7 @@ pass "synthetic source logs created"
 
 section "─── 03: --version ───────────────────────────────────────────"
 "$SCRIPT" --version > "$WORK/version.out"
-grep -Eq '^log-shipper 0\.1\.0$' "$WORK/version.out" || fail "--version output mismatch: $(cat "$WORK/version.out")"
+grep -Eq '^log-shipper 0\.2\.0$' "$WORK/version.out" || fail "--version output mismatch: $(cat "$WORK/version.out")"
 pass "--version exits 0 and prints exact banner"
 "$SCRIPT" --version --json > "$WORK/version.json"
 python3 - "$WORK/version.json" <<'PY' || fail "--version --json contract failed"
@@ -230,7 +230,7 @@ cp "$FIX/cert-watch/cert-watch.jsonl" "$AUTO_STATE/cert-watch/cert-watch.jsonl"
 cat > "$AUTO_CONFIG/manifest.json" <<EOF
 {
   "name": "agent-toolkit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "tools": [
     {"name": "cert-watch"},
     {"name": "log-shipper"},
@@ -296,7 +296,7 @@ for cap in "${EXPECTED_CAPS[@]}"; do
     schemas) [ -f "$REPO_ROOT/schemas/log-shipper-report.schema.json" ] || fail "$cap probe missing" ;;
     sections) [ -f "$SECTIONS_LOG/log-shipper.jsonl" ] || fail "$cap probe missing" ;;
     toolkit-manifest) grep -q 'log-shipper' "$WORK/version.json" || fail "$cap probe missing" ;;
-    version) grep -q '^log-shipper 0\.1\.0$' "$WORK/version.out" || fail "$cap probe missing" ;;
+    version) grep -q '^log-shipper 0\.2\.0$' "$WORK/version.out" || fail "$cap probe missing" ;;
     version-json) [ -f "$WORK/version.json" ] || fail "$cap probe missing" ;;
     *) fail "unexpected capability $cap" ;;
   esac

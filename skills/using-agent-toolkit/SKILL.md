@@ -174,8 +174,8 @@ system-janitor
 Targeted preview is better than disabling many env vars:
 
 ```bash
-system-janitor --only docker_prune,go_build_cache --dry-run
-system-janitor --only docker_prune,go_build_cache
+system-janitor --only docker_prune,podman_prune,go_build_cache --dry-run
+system-janitor --only docker_prune,podman_prune,go_build_cache
 ```
 
 ### Updater preview, then apply

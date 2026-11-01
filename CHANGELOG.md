@@ -12,8 +12,11 @@ codes, status enums, capability strings) over human-facing UX.
 
 ## [Unreleased]
 
+- Install the observable cron launcher and approved daily, hourly, and quarter-hourly schedules with safe quoting, migration, and dry-run previews.
+
 ### Added
 
+- `system-janitor.sh` now prunes unused Podman images via a separately auditable `podman_prune` section. It preserves containers and volumes; `JANITOR_PODMAN_PRUNE=no` disables the section. The capability is exposed as `podman-prune`.
 - `log-shipper.sh` — fourth shipped toolkit tool: read-only audit-trail exporter that re-emits janitor / updater / cert-watch JSONL into Prometheus textfile, NDJSON, and OTLP-shaped JSON outputs.
 - `tests/log-shipper-smoke.sh`, `schemas/log-shipper-{report,health}.schema.json`, `docs/log-shipper*.md`, `docs/agents/log-shipper-*.md`, and `examples/log-shipper.config.example` — full schema/doc/test/example surface for log-shipper.
 - `install.sh` and `tests/install-smoke.sh` now manage `log-shipper` alongside the other toolkit tools (symlink, hourly cron entry, manifest tool list).

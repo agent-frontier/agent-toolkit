@@ -38,7 +38,7 @@ else
   jq . <<EOF
 {
   "name": "agent-toolkit",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "install_root": "$REPO_ROOT",
   "generated_at": "2026-05-18T19:52:26Z",
   "tools": [

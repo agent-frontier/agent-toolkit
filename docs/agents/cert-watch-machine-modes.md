@@ -83,7 +83,7 @@ Capability discovery surface.
 ```json
 {
   "name": "cert-watch",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "capabilities": [
     "cert-hosts", "cert-paths", "cert-status-enum", "doctor",
     "doctor-json", "health", "health-acknowledge", "health-json",

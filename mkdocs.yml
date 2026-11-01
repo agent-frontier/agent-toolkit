@@ -1,6 +1,6 @@
 site_name: agent-toolkit
 site_url: https://agent-frontier.github.io/agent-toolkit/
-site_description: Agent-first cron toolkit for Linux servers — JSONL audit trail, capability discovery, dry-run defaults.
+site_description: Agent-first cron toolkit for Linux servers — JSONL audit trail, capability discovery, safe update previews.
 site_author: agent-frontier
 repo_url: https://github.com/agent-frontier/agent-toolkit
 repo_name: agent-frontier/agent-toolkit
@@ -75,6 +75,9 @@ nav:
   - Install:
       - Quick start: install.md
       - Updater install: updater-install.md
+      - Cert-watch install: cert-watch-install.md
+      - Log-shipper install: log-shipper-install.md
+      - Cron troubleshooting: cron-troubleshooting.md
   - Configuration:
       - Janitor: configuration.md
       - Updater: updater-configuration.md

@@ -131,8 +131,8 @@ When you add a section you MUST also:
 
 1. Append the name to the `KNOWN_SECTIONS` array (source of truth for `--only`
    validation AND execution order). Current contents (declaration order):
-   `docker_prune go_build_cache tmp_gobuild_orphans workspace_binobj
-   extra_cleanup aged_logs nuget_http_temp`.
+   `docker_prune podman_prune go_build_cache tmp_gobuild_orphans
+   workspace_binobj extra_cleanup aged_logs nuget_http_temp`.
 2. If the section is opt-in (does nothing unless the operator points a
    `JANITOR_*_DIRS` knob at a path), append it to `OPTIN_SECTIONS` too —
    that's what promotes empty real runs from `ok` to `idle` (silent-failure
@@ -262,8 +262,8 @@ When you add a section you MUST also:
   treat as "no signal yet", not as failure). Don't introduce new codes
   without updating both the README and `--help`.
 - **`--only` is the agent's targeted-cleanup interface.** When an agent
-  wants to exercise a subset of sections (e.g. just `docker_prune`, or
-  `docker_prune,go_build_cache`), it MUST use `--only <list>` rather than
+  wants to exercise a subset of sections (e.g. just `podman_prune`, or
+  `docker_prune,podman_prune`), it MUST use `--only <list>` rather than
   setting every other `JANITOR_*=no` knob individually — the env-var
   approach is brittle (six knobs to remember; one new section silently
   breaks it). `--only` filters the candidate set; the existing

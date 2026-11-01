@@ -2,7 +2,7 @@
 
 > Production-grade cleanup and updates for Linux servers, with a machine-readable audit trail every autonomous agent can read.
 
-`agent-toolkit` packages two Bash-first, cron-safe Linux server tools: `system-janitor` for disk and cache cleanup, and `system-updater` for apt update sweeps. Both share one agent contract: capability discovery via `--version --json`, structured machine modes, append-only JSONL audit trails, atomic state writes, and dry-run-first behavior.
+`agent-toolkit` packages four Bash-first, cron-safe Linux server tools: `system-janitor` for disk and cache cleanup, `system-updater` for apt update sweeps, `cert-watch` for TLS expiry checks, and `log-shipper` for audit export. All four share one agent contract: capability discovery via `--version --json`, structured machine modes, append-only JSONL audit trails, atomic state writes, and explicit dry-run preview modes. Janitor performs configured cleanup unless `--dry-run` is passed; updater previews by default and requires explicit `--apply`.
 
 !!! info "This is the docs site"
     Main repository: [github.com/agent-frontier/agent-toolkit](https://github.com/agent-frontier/agent-toolkit)
@@ -11,7 +11,7 @@
 
 ### DevOps humans
 
-Start with [Install](install.md), then [Configuration](configuration.md), then [Usage](usage.md).
+Start with [Install](install.md), then [Cron troubleshooting](cron-troubleshooting.md), [Configuration](configuration.md), and [Usage](usage.md).
 
 ### Autonomous agents
 
@@ -29,9 +29,11 @@ See the repository's [MCP server README](https://github.com/agent-frontier/agent
 
     ---
 
-    Install the janitor and updater tools, wire cron, and verify first runs.
+    Install all four tools, wire cron, and verify first runs.
 
-    [Open install guides](install.md)
+    [Janitor](install.md) · [Updater](updater-install.md) · [Cert-watch](cert-watch-install.md) · [Log-shipper](log-shipper-install.md)
+
+    [Diagnose scheduled runs](cron-troubleshooting.md)
 
 -   :material-tune: **Configuration**
 
@@ -71,4 +73,4 @@ See the repository's [MCP server README](https://github.com/agent-frontier/agent
 
 - Repository: [agent-frontier/agent-toolkit](https://github.com/agent-frontier/agent-toolkit)
 - License: [Apache 2.0](https://github.com/agent-frontier/agent-toolkit/blob/main/LICENSE)
-- Current tagged baseline in docs: `v0.1.0`
+- Native version for this checkout: `0.2.0`; each tool's `--version --json` is authoritative. Examples pinned to `v0.1.0` target a historical release, not this checkout.

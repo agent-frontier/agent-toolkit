@@ -8,11 +8,13 @@
 # All knobs here are JANITOR_* environment variables. The script applies
 # the defaults shown below if a variable is unset.
 #
-# Section gating (KNOWN_SECTIONS = docker_prune, go_build_cache,
-# tmp_gobuild_orphans, workspace_binobj, extra_cleanup, nuget_http_temp):
+# Section gating (KNOWN_SECTIONS = docker_prune, podman_prune,
+# go_build_cache, tmp_gobuild_orphans, workspace_binobj, extra_cleanup,
+# aged_logs, nuget_http_temp):
 #
 #   default-ON (run if their tooling is present):
 #     docker_prune          gated by JANITOR_DOCKER_PRUNE=yes
+#     podman_prune          gated by JANITOR_PODMAN_PRUNE=yes (unused images only)
 #     go_build_cache        gated by JANITOR_GO_CLEAN=yes
 #     tmp_gobuild_orphans   gated by JANITOR_TMP_GOBUILD_ORPHANS=yes
 #     nuget_http_temp       gated by JANITOR_NUGET_CLEAN=yes
@@ -70,6 +72,7 @@
 # ── Section toggles (defaults: yes if tooling is present) ─────────────
 # JANITOR_DOCKER_PRUNE=yes
 # JANITOR_DOCKER_VOLUMES=yes        # pass --volumes to docker system prune
+# JANITOR_PODMAN_PRUNE=yes          # prune unused images; never containers or volumes
 # JANITOR_GO_CLEAN=yes              # gates the go_build_cache section
 # JANITOR_TMP_GOBUILD_ORPHANS=yes
 # JANITOR_NUGET_CLEAN=yes           # gates the nuget_http_temp section

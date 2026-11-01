@@ -1,7 +1,7 @@
 # Install
 
 `system-janitor` is a single bash script with no runtime dependencies beyond
-the toolchains it cleans (Docker, Go, .NET) — and it skips any toolchain that
+the toolchains it cleans (Docker, Podman, Go, .NET) — and it skips any toolchain that
 isn't installed, so the same script works on a Go-only host or a
 Docker-only host without configuration.
 
@@ -9,7 +9,7 @@ Docker-only host without configuration.
 
 - Linux or macOS with `bash` 4+, `flock`, `python3` (for JSON emit), and
   `coreutils`
-- The toolchains you want cleaned, on `$PATH` (`docker`, `go`, `dotnet`).
+- The toolchains you want cleaned, on `$PATH` (`docker`, `podman`, `go`, `dotnet`).
   Missing toolchains are silently skipped — they are not errors.
 
 ## Install
@@ -20,20 +20,21 @@ cd ~/agent-toolkit
 ./install.sh
 ```
 
-The installer creates or repairs `~/.local/bin/system-janitor`,
-installs the managed weekly cron entry, and also wires up the sibling
-`system-updater` tool from the same checkout. Make sure `~/.local/bin`
+The installer creates or repairs `~/.local/bin/system-janitor` and the
+supporting `~/.local/bin/agent-toolkit-cron` launcher, installs the managed
+daily cron entry, and also wires up the sibling `system-updater` tool from
+the same checkout. Make sure `~/.local/bin`
 is on your `$PATH`. Verify:
 
 ```bash
 system-janitor --version
-# → system-janitor 0.1.0
+# → system-janitor 0.2.0
 ```
 
 ## Optional: install a config file
 
-The default sections (Docker prune, Go cache clean, `/tmp/go-build*`
-orphans, NuGet http/temp cache) run without any config. You only need a
+The default sections (Docker and dangling Podman image prune, Go cache
+clean, `/tmp/go-build*` orphans, NuGet http/temp cache) run without any config. You only need a
 config file if you want to enable an opt-in section like `workspace_binobj`
 or `safety_integrity`. See [configuration.md](./configuration.md) for the
 full reference.
@@ -46,12 +47,16 @@ $EDITOR ~/.config/system-janitor/config
 
 ## Schedule with cron
 
-`./install.sh` installs the managed weekly entry below automatically and
-repairs stale paths left behind by old checkouts:
+`./install.sh` installs the managed daily entry below automatically and
+repairs stale paths left behind by old checkouts. The launcher receives the
+absolute installed tool path as its final argument, preserving native doctor
+compatibility. The illustrative `$HOME` below expands in cron's shell; for manual
+entries and native doctor checks, copy the literal absolute paths printed by
+`./install.sh --dry-run`:
 
 ```cron
-# system-janitor — weekly disk cleanup (managed by agent-toolkit install.sh)
-17 3 * * 0 $HOME/.local/bin/system-janitor
+# system-janitor — daily disk cleanup (managed by agent-toolkit install.sh)
+17 3 * * * "$HOME/.local/bin/agent-toolkit-cron" "$HOME/.local/bin/system-janitor"
 ```
 
 If you prefer to manage cron manually, use the same comment and command so

@@ -26,6 +26,7 @@ files; they only clear caches the toolchain knows how to regenerate.
 | Section | What it does |
 |---|---|
 | `docker_prune` | `docker system prune -af --volumes` — removes only resources not in use |
+| `podman_prune` | `podman image prune --all --force` — removes images not used by any container; does not prune containers or volumes |
 | `go_build_cache` | `go clean -cache -testcache` |
 | `tmp_gobuild_orphans` | Removes `/tmp/go-build*` and `/tmp/gopath` |
 | `nuget_http_temp` | `dotnet nuget locals http-cache --clear` and `temp --clear` (preserves `global-packages`) |
@@ -37,7 +38,7 @@ files; they only clear caches the toolchain knows how to regenerate.
 | `workspace_binobj` | `JANITOR_WORKSPACE_DIRS` — colon-separated dirs scanned for `bin/` and `obj/` (.NET build outputs) |
 | `extra_cleanup` | `JANITOR_EXTRA_CLEANUP_DIRS` — colon-separated dirs to remove entirely. Items containing glob metacharacters (`*`, `?`, `[`) are expanded at runtime, so patterns like `/tmp/build-*-target` work. |
 | `aged_logs` | `JANITOR_AGED_LOG_DIRS` — colon-separated dirs whose files older than `JANITOR_AGED_LOG_DAYS` (default 7) are deleted recursively. Directories are preserved; only stale files are pruned. |
-| `safety_integrity` | `JANITOR_SAFETY_FLOOR_DIRS` — colon-separated dirs whose inode and total byte size must NOT change during the run |
+| `safety_integrity` | `JANITOR_SAFETY_FLOOR_DIRS` — colon-separated dirs whose inode must not change and which must remain present; size-only changes are informational |
 
 ## Environment variable reference
 
@@ -47,9 +48,10 @@ files; they only clear caches the toolchain knows how to regenerate.
 | `JANITOR_EXTRA_CLEANUP_DIRS` | (unset) | Colon-separated dirs to remove entirely (glob patterns supported) |
 | `JANITOR_AGED_LOG_DIRS` | (unset) | Colon-separated dirs whose old files are pruned |
 | `JANITOR_AGED_LOG_DAYS` | `7` | Age threshold in days for `aged_logs` |
-| `JANITOR_SAFETY_FLOOR_DIRS` | (unset) | Colon-separated dirs whose inode+size must not change |
+| `JANITOR_SAFETY_FLOOR_DIRS` | (unset) | Colon-separated dirs that must remain present with unchanged inodes; size changes are informational |
 | `JANITOR_DOCKER_PRUNE` | `yes` | Run `docker system prune` |
 | `JANITOR_DOCKER_VOLUMES` | `yes` | Pass `--volumes` to docker prune |
+| `JANITOR_PODMAN_PRUNE` | `yes` | Run `podman image prune --all` (unused images only; no containers or volumes) |
 | `JANITOR_GO_CLEAN` | `yes` | Run `go clean -cache -testcache` |
 | `JANITOR_TMP_GOBUILD_ORPHANS` | `yes` | Remove `/tmp/go-build*` and `/tmp/gopath` |
 | `JANITOR_NUGET_CLEAN` | `yes` | Clear NuGet http-cache and temp |

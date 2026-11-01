@@ -1,0 +1,6 @@
+[Unit]
+Description=Disk-pressure guard (>=75%) and daily 03:17 catch-up for system-janitor
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/system-janitor-catchup

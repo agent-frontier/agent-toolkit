@@ -136,7 +136,7 @@ Capability discovery surface. Read-only; requires no state.
 ```json
 {
   "name": "system-updater",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "capabilities": [
     "apt-backend", "exclude", "force", "health", "health-acknowledge",
     "health-json", "holds", "maintenance-window", "only",
