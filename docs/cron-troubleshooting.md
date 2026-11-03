@@ -188,7 +188,7 @@ system-janitor-catchup --status --json
 
 Configure roots and budgets in
 `~/.config/system-janitor/maintenance.json`; start from
-[`examples/maintenance.example.json`](../examples/maintenance.example.json).
+[`examples/maintenance.example.json`](https://github.com/agent-frontier/agent-toolkit/blob/main/examples/maintenance.example.json).
 `archive_roots` bounds receipt-backed projects, while `worktree_roots` lists
 directories containing completed worker checkouts. New worktrees must be
 clean and recoverable from their existing `origin` before artifacts qualify.
@@ -203,6 +203,22 @@ workspace artifacts without deleting them. Results go to
 backups), with actions, protected paths, errors and
 observed reclaimed bytes. Missing tools and failed cleanup are visible errors,
 not successful empty sweeps. Existing daily cron schedules stay unchanged.
+
+When the guarded helper owns build cleanup on a continuously busy host, also
+set these values in `~/.config/system-janitor/config`:
+
+```bash
+JANITOR_GO_CLEAN=no
+JANITOR_TMP_GOBUILD_ORPHANS=no
+JANITOR_WORKSPACE_DIRS=""
+JANITOR_EXTRA_CLEANUP_DIRS=""
+```
+
+The native daily sections do not share the helper's activity, lease or archive
+checks; leaving them enabled would bypass those protections overnight.
+Container and aged-log cleanup retain their existing settings. Only eligible
+roots in `maintenance.json` are managed by the helper; other build trees are
+retained, not silently added to its deletion scope.
 
 ### Keeping continuous builds from defeating cleanup
 
