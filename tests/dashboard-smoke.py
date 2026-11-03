@@ -128,6 +128,64 @@ class AccessTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
 
+    def test_control_http_gates_reject_cross_site_and_unconfirmed_requests(self):
+        # A LAN viewer must not become a form/CSRF/arbitrary-method control proxy.
+        calls = []
+        class Controls:
+            nonce = d.secrets.token_urlsafe(32)
+            def execute(self, payload):
+                calls.append(payload)
+                return {"ok": True, "message": "fixture action"}
+        controls = Controls()
+        token = d.secrets.token_urlsafe(32)
+        cache = d.Snapshot()
+        cache.publish({"status": "healthy"})
+        server = d.DashboardServer(("127.0.0.1", 0), d.handler_for(cache, token, controls))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            origin = f"http://127.0.0.1:{server.server_port}"
+            valid = {"Origin": origin, "Authorization": "Bearer " + token,
+                     "X-Action-Token": controls.nonce, "Content-Type": "application/json"}
+            body = json.dumps({"kind": "service", "scope": "user", "unit": "fixture.service", "action": "stop"})
+            def request(headers, payload=body, method="POST", path="/api/action"):
+                client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                try:
+                    client.request(method, path, body=payload, headers=headers)
+                    response = client.getresponse()
+                    response.read()
+                    return response.status
+                finally:
+                    client.close()
+            invalid = [
+                ({key: value for key, value in valid.items() if key != "Origin"}, 403),
+                (dict(valid, Origin="https://foreign.invalid"), 403),
+                (dict(valid, Host="foreign.invalid"), 403),
+                (dict(valid, **{"Sec-Fetch-Site": "cross-site"}), 403),
+                (dict(valid, **{"X-Action-Token": "invalid"}), 403),
+                ({key: value for key, value in valid.items() if key != "Authorization"}, 401),
+                (dict(valid, **{"Content-Type": "text/plain"}), 415),
+                (dict(valid, **{"Content-Length": "4097"}), 413),
+            ]
+            for headers, status in invalid:
+                with self.subTest(status=status, headers=list(headers)):
+                    self.assertEqual(request(headers), status)
+            self.assertEqual(request(valid, payload="{bad"), 400)
+            self.assertEqual(request(valid, method="DELETE"), 405)
+            self.assertEqual(request(valid, path="/api/other"), 405)
+            self.assertEqual(calls, [])
+            self.assertEqual(request(valid), 200)
+            self.assertEqual(calls, [json.loads(body)])
+            controls.nonce = d.secrets.token_urlsafe(32)
+            self.assertEqual(request(valid), 403)
+            server.RequestHandlerClass = d.handler_for(cache, token)
+            self.assertEqual(request(dict(valid, **{"X-Action-Token": controls.nonce})), 403)
+            self.assertEqual(len(calls), 1)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
     def tls_pair(self):
         cert, key = Path(self.temp.name) / "server.crt", Path(self.temp.name) / "server.key"
         subprocess.run(
@@ -157,6 +215,7 @@ class AccessTests(unittest.TestCase):
                 dict(valid, tls_cert=None, tls_key=None),
                 dict(valid, unexpected=True), {"tls_cert": False, "tls_key": False},
                 {"trusted_lan": True}, dict(valid, trusted_lan="yes"),
+                dict(valid, actions="true"),
                 dict(valid, trusted_lan=True, tls_cert=None, tls_key=None),
             ):
                 profile.write_text(json.dumps(invalid))

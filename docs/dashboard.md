@@ -3,7 +3,8 @@
 The optional dashboard shows live disk availability and inode usage, CPU,
 RAM/swap, uptime, network throughput, top processes, system/user services,
 Docker/Podman containers in all states, and Janitor cache budgets and activity.
-It is **read-only**: no cleanup, restart, terminal or arbitrary-command endpoints.
+It is **read-only by default**. Explicit homelab controls add fixed
+Stop/Kill/Remove actions, not a terminal or arbitrary-command endpoint.
 It uses Python 3.10+ and local static assets; no npm build, metrics database,
 third-party scripts or telemetry.
 
@@ -34,9 +35,10 @@ Without a profile, the user service binds **only `127.0.0.1:8787`**.
 Direct LAN access is an explicit HTTPS-only option below; wildcard and public
 addresses are rejected.
 It runs as the current user with `NoNewPrivileges`, bounded memory/tasks, and
-no added groups or socket permissions. Read-only behavior is enforced by its
-fixed observation paths and absence of control endpoints, not a read-only home
-mount. Filesystem namespacing in unprivileged user units can remap supplementary
+no added groups or socket permissions. With `actions=false`, only observation
+paths are enabled. Opt-in controls add the fixed, scoped operations below;
+neither mode relies on a read-only home mount. Filesystem namespacing in
+unprivileged user units can remap supplementary
 groups and hide otherwise-authorized Docker socket access, so it is not enabled.
 To start on boot without an interactive login, user lingering must already be
 enabled; inspect it with `loginctl show-user "$USER" -p Linger`. Enabling it is a
@@ -87,9 +89,9 @@ The dashboard does not enable a firewall, router forwarding or public access.
 
 For a trusted home LAN where the plain URL should open immediately, add
 `"trusted_lan": true` to this profile and restart the dashboard. **Anyone on the
-allowed subnet can then view the read-only stats without logging in.** HTTPS,
-explicit private binding, client CIDRs, Host/Origin checks and the absence of
-control endpoints remain mandatory. No token file is needed in this mode;
+allowed subnet can then view the stats without logging in.** HTTPS,
+explicit private binding, client CIDRs, Host/Origin checks and fixed endpoint
+allowlists remain mandatory. No token file is needed in this mode;
 `--url` prints the plain address. Removing the setting restores token access.
 The browser attempts to load the dashboard automatically and only shows the
 login prompt when the server actually requires one.
@@ -154,8 +156,10 @@ Both running and stopped/created containers are included. Docker and the
 current user's Podman inventory have separate headings and engine/state filters.
 For user Podman, an operator can enable the private local socket with
 `systemctl --user enable --now podman.socket`; this does not start containers.
-The dashboard itself never enables sockets, starts containers or changes their
-state. Rootful/system Podman is not silently combined with the user's inventory.
+The dashboard itself never enables sockets or starts containers. It does not
+change container state with `actions=false`; enabled homelab controls can
+stop/kill/remove the selected target as documented below. Rootful/system Podman
+is not silently combined with the user's inventory.
 
 ## Interactive viewing
 
@@ -172,8 +176,50 @@ Chart ranges are relative to the most recent observation, including while paused
 
 Tap a service, process or container name for dated snapshot details, or
 **View last cleanup** for the native Janitor result. These are inspection controls
-only: no stop/start/restart, delete, arbitrary command or cleanup endpoints are
-added to the login-free page. All detail text is rendered as text, not HTML.
+only while controls are disabled. All detail text is rendered as text, not HTML.
+
+## Homelab Stop / Kill / Remove
+
+Set `"actions": true` in the same private profile and restart the dashboard to
+enable controls. Default installations remain observers. In `trusted_lan` mode
+**anyone on the allowed LAN can use these controls**; no extra password, token
+entry or terminal step is imposed on the phone.
+
+Tap an item, choose its action, then confirm the exact named target:
+
+- Docker/Podman: **Stop gracefully** gives the daemon up to 10 seconds before it
+  may force-kill a container that has not exited. **Kill now** skips that grace
+  period. **Remove container** applies once stopped/created and never deletes
+  volumes or recursively removes dependents.
+- Processes: **Terminate** (SIGTERM) or **Force kill** (SIGKILL), only for the
+  dashboard user's processes. Fresh PID start-time and pidfd checks prevent
+  killing a reused PID. The dashboard, its ancestors and core session processes
+  are protected. A service manager may restart a killed process.
+- Services: **Stop service** for noncritical, loaded **user** units. System units,
+  this dashboard, the disk guard and protected infrastructure stay view-only.
+  No root service privileges are granted.
+
+Actions use one fixed JSON POST endpoint with source CIDR, Host/Origin,
+authentication-policy and per-server nonce checks. Cross-site forms, arbitrary
+commands, signal numbers, paths and raw container API forwarding are rejected.
+Only one action runs at a time; the result is explicit and the single background
+sampler is woken afterward. Timeouts/interrupted requests can leave completion
+unknown: refresh before retrying instead of assuming nothing happened.
+Container mutation transport has a total 15-second monotonic budget, not an
+inactivity timeout that resets on each byte. Inventory reads use a separate
+two-second total transport budget. Unexpected mutation statuses are rejected
+without reading their response bodies.
+
+Private `dashboard-actions.jsonl` under
+`~/.local/state/agent-toolkit/` records an action ID, sanitized target,
+started event and succeeded/failed/unknown outcome. It rotates at 5MiB with eight
+backups; tokens, nonces, environments and command arguments are never logged.
+Failure to write the initial `started` record prevents dispatch. If writing the
+outcome fails after an attempt, the action may already have completed while the
+journal retains only `started`; a missing terminal record is not proof of
+failure. The client receives unknown completion: inspect fresh state before
+retrying.
+Disable `"actions"` to restore observer mode without changing LAN access.
 
 ## Machine interface and operations
 

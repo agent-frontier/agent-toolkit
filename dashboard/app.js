@@ -4,6 +4,9 @@ const $ = id => document.getElementById(id);
 let snapshot = null;
 let paused = false;
 let refreshing = false;
+let detailTarget = null;
+let pendingAction = null;
+let actionBusy = false;
 let token = new URLSearchParams(location.hash.slice(1)).get("token") || sessionStorage.getItem("dashboard-token") || "";
 if (location.hash) history.replaceState(null, "", location.pathname);
 const bytes = value => {
@@ -40,6 +43,11 @@ function detailFields(fields) {
   });
 }
 function showDetails(kind, item) {
+  if (actionBusy) return;
+  detailTarget = {kind, item};
+  pendingAction = null;
+  $("action-confirm").hidden = true;
+  text("action-result", "");
   const fields = kind === "Service" ? [["Unit", item.unit], ["Scope", item.scope], ["State", item.active], ["Substate", item.sub], ["Description", item.description]] :
     kind === "Process" ? [["Name", item.name], ["PID", item.pid], ["CPU", pct(item.cpu_percent)], ["RAM", bytes(item.memory_bytes)]] :
     kind === "Container" ? [["Name", item.Names], ["Engine", item.engine], ["ID", item.ID], ["Image", item.Image], ["State", item.State || item.Status]] :
@@ -47,7 +55,81 @@ function showDetails(kind, item) {
   text("detail-title", `${kind} details`);
   text("detail-observed", `Snapshot observed ${when(snapshot?.generated_at)}; this detail view is fixed until reopened.`);
   detailFields(fields);
+  drawActions();
   $("detail-dialog").showModal();
+}
+function drawActions() {
+  const controls = $("action-controls");
+  controls.replaceChildren(); controls.hidden = true;
+  if (!snapshot?.actions?.enabled || !detailTarget) {
+    text("detail-policy", "Read-only mode. Homelab controls are not enabled.");
+    return;
+  }
+  const {kind, item} = detailTarget;
+  let choices = [];
+  if (kind === "Container" && !item.protected && /^[a-f0-9]{64}$/.test(item.id || "")) {
+    choices = item.State === "running" || item.State === "paused" || item.State === "restarting" ?
+      [["stop", "Stop gracefully"], ["kill", "Kill now"]] : [["remove", "Remove container"]];
+    text("detail-policy", "Container actions keep all volumes. Running containers must be stopped before removal.");
+  } else if (kind === "Process" && item.controllable) {
+    choices = [["terminate", "Terminate"], ["kill", "Force kill"]];
+    text("detail-policy", "Signals target this exact process identity. A service manager may restart it; stop its user service instead if needed.");
+  } else if (kind === "Service" && item.scope === "user" && !(snapshot.actions.protected_services || []).includes(item.unit)) {
+    choices = [["stop", "Stop service"]];
+    text("detail-policy", "Stops this user service. Core connectivity, the dashboard and protected services stay guarded.");
+  } else {
+    text("detail-policy", kind === "Service" ? "System/protected service: view-only. No root privileges are granted." :
+      kind === "Process" ? "System, protected or unavailable process: view-only." : "No control action for this item.");
+  }
+  choices.forEach(([action, label]) => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "danger"; button.textContent = label;
+    button.addEventListener("click", () => confirmAction(action, label));
+    controls.append(button);
+  });
+  controls.hidden = !choices.length;
+}
+function confirmAction(action, label) {
+  if (actionBusy || !detailTarget) return;
+  const {kind, item} = detailTarget;
+  const payload = kind === "Container" ? {kind: "container", engine: item.engine, id: item.id, action} :
+    kind === "Process" ? {kind: "process", pid: item.pid, start_time_ticks: item.start_time_ticks, action} :
+    {kind: "service", scope: item.scope, unit: item.unit, action};
+  const target = kind === "Container" ? `${item.Names} (${item.engine}, ${item.ID})` :
+    kind === "Process" ? `${item.name} (PID ${item.pid})` : `${item.unit} (${item.scope})`;
+  pendingAction = {payload, target, label};
+  const effect = action === "remove" ? " Volumes will be kept." :
+    kind === "Container" && action === "stop" ? " The daemon waits up to 10 seconds, then may force-kill if it has not exited." : "";
+  text("action-question", `${label}: ${target}?${effect}`);
+  text("action-run", label);
+  $("action-confirm").hidden = false;
+  text("action-result", "");
+}
+async function runAction() {
+  if (actionBusy || !pendingAction || !snapshot?.actions?.nonce) return;
+  const request = pendingAction;
+  actionBusy = true;
+  $("action-run").disabled = true; $("action-cancel").disabled = true; $("detail-close").disabled = true;
+  text("action-result", `${request.label} in progress for ${request.target}...`);
+  try {
+    const response = await fetch("/api/action", {
+      method: "POST",
+      headers: {"Content-Type": "application/json", "X-Action-Token": snapshot.actions.nonce,
+        ...(token ? {Authorization: `Bearer ${token}`} : {})},
+      body: JSON.stringify(request.payload), signal: AbortSignal.timeout(20000),
+    });
+    const result = await response.json();
+    if (!response.ok || !result.ok) throw new Error(result.error || `Action failed (HTTP ${response.status})`);
+    text("action-result", result.message);
+  } catch (error) {
+    text("action-result", `${error.message}. Refresh the observation before retrying; an interrupted request may still complete.`);
+  } finally {
+    actionBusy = false; pendingAction = null;
+    $("action-run").disabled = false; $("action-cancel").disabled = false; $("detail-close").disabled = false;
+    $("action-confirm").hidden = true;
+    $("action-controls").replaceChildren(); $("action-controls").hidden = true;
+    refresh(true);
+  }
 }
 function inspectRow(values, kind, item) {
   const tr = row(values), button = document.createElement("button");
@@ -87,7 +169,7 @@ function serviceRows() {
   text("failed-count", `${failed} failed / ${all.length} listed`);
   const unavailable = [!snapshot.system_services && "system", !snapshot.user_services && "user"].filter(Boolean);
   text("services-note", unavailable.length ? `Unavailable scopes: ${unavailable.join(", ")}. See observation gaps.` :
-    `${rows.length} shown. ${[snapshot.system_services, snapshot.user_services].some(scope => scope?.truncated) ? "Inventory capped at 250 per scope." : "System + user scopes; no start/stop controls."}`);
+    `${rows.length} shown. ${[snapshot.system_services, snapshot.user_services].some(scope => scope?.truncated) ? "Inventory capped at 250 per scope." : snapshot.actions?.enabled ? "Tap a user service for Stop; system units stay view-only." : "System + user scopes; observer mode."}`);
 }
 function processRows() {
   const query = $("process-search").value.toLowerCase(), sort = $("process-sort").value;
@@ -164,7 +246,8 @@ function render(value) {
   snapshot = value;
   $("content").hidden = false;
   $("login").hidden = true;
-  text("host", `${value.host} / private, read-only monitoring`);
+  text("host", `${value.host} / ${value.actions?.enabled ? "homelab controls enabled" : "private, read-only monitoring"}`);
+  badge("controls-status", value.actions?.enabled ? "Controls on - trusted access" : "Read-only", !value.actions?.enabled);
   badge("connection", paused ? "Paused" : value.status === "healthy" ? "Live" : "Partial data", !paused && value.status === "healthy");
   liveControls();
   text("updated", `Observed ${new Date(value.generated_at).toLocaleTimeString()}`);
@@ -266,5 +349,8 @@ $("container-engine").addEventListener("change", containerRows);
 $("container-state").addEventListener("change", containerRows);
 $("history-window").addEventListener("change", drawHistory);
 $("detail-close").addEventListener("click", () => $("detail-dialog").close());
+$("detail-dialog").addEventListener("cancel", event => { if (actionBusy) event.preventDefault(); });
+$("action-run").addEventListener("click", runAction);
+$("action-cancel").addEventListener("click", () => { if (!actionBusy) { pendingAction = null; $("action-confirm").hidden = true; } });
 $("cleanup-details").addEventListener("click", () => { if (snapshot?.janitor?.last_run) showDetails("Cleanup", snapshot.janitor.last_run); });
 refresh();

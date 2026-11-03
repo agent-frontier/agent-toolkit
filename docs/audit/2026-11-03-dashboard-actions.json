@@ -1,0 +1,77 @@
+{
+  "format_version": 1,
+  "date": "2026-11-03",
+  "scope": "Opt-in homelab control actions and the actual phone click-confirm-operation workflow",
+  "documentation_result": "PASS",
+  "method": "Four independent retained documentation personas reviewed the changed operational contract against engine, HTTP/UI code and evidence. Parent technical-writer consolidation; narrow follow-ups confirmed all remediations. Code-review/publication status is separate.",
+  "reviewers": [
+    {"persona": "Junior Developer", "result": "PASS after remedies", "findings": ["A1"]},
+    {"persona": "Senior Developer", "result": "PASS after remedies", "findings": ["A1", "A3"]},
+    {"persona": "Principal Developer", "result": "PASS after remedies", "findings": ["A1", "A2"]},
+    {"persona": "Project Manager", "result": "PASS after remedies", "findings": ["A1", "A2"]}
+  ],
+  "actions": [
+    {
+      "id": "A1",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "Old unconditional no-control/no-state-change assurances contradicted newly enabled homelab controls.",
+      "remedy": "Explicitly restrict observation-only behavior to actions=false. Keep socket enabling and container starts unconditionally absent; describe fixed opt-in stop/kill/remove operations and permission boundaries.",
+      "evidence": "docs/dashboard.md observer-mode and container paragraphs; all four persona follow-ups confirmed the correction."
+    },
+    {
+      "id": "A2",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "Outcome-audit failure can leave a started-only journal even if an operation completed.",
+      "remedy": "Document initial-audit failure prevents dispatch, while failed post-attempt logging yields unknown completion. Missing terminal records do not prove failure; inspect fresh state before retrying.",
+      "evidence": "docs/dashboard.md action journal/recovery paragraph; principal and PM follow-ups confirmed; engine failure-injection tests cover the distinction."
+    },
+    {
+      "id": "A3",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "Stop gracefully did not disclose the daemon's fixed10-second grace before possible force kill.",
+      "remedy": "Show10-second escalation in documentation and exact-target confirmation, with no new login or confirmation step.",
+      "evidence": "docs/dashboard.md container operations; dashboard/app.js confirmation; actual-app Node assertion; senior follow-up confirmed."
+    },
+    {
+      "id": "O1",
+      "class": "Operator action",
+      "status": "accepted authorization model",
+      "finding": "Trusted-LAN controls intentionally let allowed network users invoke enabled operations without additional manual credentials.",
+      "remedy": "Enable actions only for the intended homelab trust boundary. Keep TLS/private bind/client CIDRs and same-origin request gates; disable actions to restore observation-only behavior."
+    }
+  ],
+  "validated_scope": {
+    "containers": "Existing local Docker/Podman authority, full IDs, fresh target policy, stop/kill/remove stopped only, no volumes/force-remove/dependency recursion or arbitrary proxy",
+    "processes": "Current-user identity, PID start-time plus pidfd binding, self/ancestors/core protection, fixed TERM/KILL only",
+    "services": "Noncritical loaded user-service stop only; no root-service privileges",
+    "http": "Opt-in, same-origin authenticated-policy JSON plus per-server nonce, typed bounded body, serialized operation and explicit results",
+    "ui": "One exact-target confirmation, inert Cancel, duplicate prevention, no phone-side terminal or new login"
+  },
+  "evidence": {
+    "engine_cases": 13,
+    "dashboard_cases": 12,
+    "actual_app_node_cases": 11,
+    "real_browser": "Actual LAN HTTPS at390px: cancelled owned process survived, confirmed SIGKILL, owned Podman container stop/kill/remove, owned transient user-service stop;5 successful operations with started+succeeded journal records and original volumes retained",
+    "fixtures": "Only disposable owned field targets acted on and cleaned; no collateral targets or image pulls",
+    "ruggedness": "One current REVIEW RUGGED for the action scope with rungs4/5"
+  },
+  "preserved_limits": [
+    "System/root service controls are not granted.",
+    "Process signal delivery is not a promise the process exited or will not be restarted by its manager.",
+    "Self-signed trust, DHCP stability and absent physical-phone/separate-device verification remain environment limits.",
+    "Four unrelated existing strict documentation-site link warnings remain outside scope."
+  ],
+  "code_review_history": {
+    "initial_spec": "CHANGES-REQUESTED94/100: core-process policy omitted full and Linux-truncated D-Bus broker launcher names.",
+    "remediation": "Added both dbus-broker-launch and dbus-broker-lau. Independent real-child/pidfd negative regression mocks only the launcher identity name and signal dispatch; both names fail before fix and return403 with no signal afterward.",
+    "targeted_validation": "12 engine+12 dashboard+11 actual-app Node cases pass; dashboard restarted to load the corrected guard.",
+    "final_spec": "PASS98/100 after exact core-launcher protection remedy; no remaining mismatch in bounded follow-up",
+    "quality_finding": "P2: an inactivity-only socket timeout let a trickling daemon hold the action lock beyond the intended operation bound.",
+    "quality_remediation": "One monotonic socket deadline limits connect/sendall/recv_into across buffered status/header/body reads; unexpected statuses rejected before body. Shared read-only inventory transport uses the same deadline mechanism with2-second budget.",
+    "quality_validation": "Independent trickle-body200 and trickle-header204 regression failed before fix, now502/504unknown within250ms at50ms budget and next scoped service action acquires lock. Engine13+dashboard12+Node11 pass; real mobile five-action fixture repeated successfully with existing volumes retained.",
+    "final_quality": "PASS after exact deadline remedy; both trickle/lock cases and action/inventory transports passed. Independent progressing-body inventory probe timed out0.051s at0.050s budget. No further blocking defects in the remedy."
+  }
+}

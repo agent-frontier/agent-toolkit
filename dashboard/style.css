@@ -51,6 +51,10 @@ td:first-child { font-weight: 550; }
 .list-controls { margin: 16px 0; }
 button.secondary { background: #192536; color: #d3e2f5; border-color: #3a4b60; }
 button:disabled { opacity: .55; cursor: wait; }
+button.danger { background: #712b35; border-color: #b94a5a; color: #ffe4e7; }
+#action-confirm { margin-top: 20px; padding: 16px; border: 1px solid #954351; border-radius: 8px; }
+#action-controls { margin-top: 16px; }
+#action-result { margin-top: 16px; font-size: .82rem; }
 button.row-button { background: none; border: 0; color: var(--blue); text-align: left; padding: 3px 0; font-size: inherit; overflow-wrap: anywhere; }
 button.row-button:hover { text-decoration: underline; }
 #cleanup-details { margin-top: 16px; }

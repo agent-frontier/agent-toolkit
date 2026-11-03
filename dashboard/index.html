@@ -24,7 +24,7 @@
     <div id="content" hidden>
       <div class="toolbar">
         <div class="filters"><button id="refresh-now" type="button">Refresh now</button><button id="live-toggle" type="button" class="secondary" aria-pressed="false">Pause updates</button></div>
-        <p id="live-status" class="muted" role="status">Live updates every 5 seconds</p>
+        <p id="live-status" class="muted" role="status">Live updates every 5 seconds</p><span id="controls-status" class="badge">Read-only</span>
       </div>
       <section class="cards" aria-label="Server overview">
         <article class="card"><p class="eyebrow">ROOT DISK</p><strong id="disk-free">--</strong><p id="disk-detail" class="muted">Available space</p><meter id="disk-meter" max="100" aria-label="Root disk usage"></meter></article>
@@ -61,7 +61,7 @@
       <section id="errors-panel" class="panel" hidden><h2>Observation gaps</h2><p class="muted">Unavailable data is not a healthy zero.</p><ul id="errors"></ul></section>
     </div>
   </main>
-  <dialog id="detail-dialog"><div class="section-heading"><h2 id="detail-title">Details</h2><button id="detail-close" type="button" class="secondary">Close</button></div><p id="detail-observed" class="muted"></p><dl id="detail-fields"></dl><p class="muted">Snapshot details only. No commands or server-control actions.</p></dialog>
-  <footer>Read-only by design. Nominal 5-second refresh. Restricted localhost or LAN HTTPS access. No third-party assets or telemetry.</footer>
+  <dialog id="detail-dialog"><div class="section-heading"><h2 id="detail-title">Details</h2><button id="detail-close" type="button" class="secondary">Close</button></div><p id="detail-observed" class="muted"></p><dl id="detail-fields"></dl><p id="detail-policy" class="muted">Read-only unless homelab controls are enabled.</p><div id="action-controls" class="filters" hidden></div><div id="action-confirm" hidden><p id="action-question"></p><div class="filters"><button id="action-run" type="button" class="danger">Confirm action</button><button id="action-cancel" type="button" class="secondary">Cancel</button></div></div><p id="action-result" role="status" aria-live="polite"></p></dialog>
+  <footer>Observer mode by default; optional homelab controls. Restricted localhost or LAN HTTPS access. No third-party assets or telemetry.</footer>
 </body>
 </html>

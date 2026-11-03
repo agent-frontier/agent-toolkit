@@ -44,6 +44,7 @@ jobs:
       - name: Run private dashboard smoke test
         run: |
           python3 ./tests/dashboard-smoke.py
+          python3 ./tests/dashboard-actions-smoke.py
           node --test ./tests/dashboard-ui-smoke.cjs
           node --check dashboard/app.js
 

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-"""Private, read-only Linux server dashboard. Python standard library only."""
+"""Private Linux server dashboard with opt-in homelab controls."""
 
 import argparse
 from collections import deque
 import datetime as dt
 import hmac
 import http.client
+import importlib.util
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
@@ -27,13 +28,29 @@ import time
 from urllib.parse import urlsplit
 
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 LIMIT = 2 * 1024 * 1024
 ASSETS = Path(__file__).resolve().parent.parent / "dashboard"
-CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "container-inventory-all", "interactive-view", "lan-https", "loopback-only",
+CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "container-inventory-all", "control-actions", "interactive-view", "lan-https", "loopback-only",
                        "read-only", "snapshot-json", "systemd-services", "trusted-lan-readonly"])
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
+_actions_module = None
+
+
+def action_module():
+    global _actions_module
+    if _actions_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "dashboard_actions", Path(__file__).resolve().with_name("dashboard_actions.py")
+        )
+        if spec is None or spec.loader is None:
+            raise ValueError("dashboard action component is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _actions_module = module
+    return _actions_module
 
 
 def utc():
@@ -51,7 +68,7 @@ def token_path():
 def server_settings(args):
     profile = xdg("XDG_CONFIG_HOME", ".config") / "agent-toolkit/dashboard.json"
     settings = {"bind": "127.0.0.1", "port": 8787, "interval": 5,
-                "tls_cert": None, "tls_key": None, "allowed_networks": [], "trusted_lan": False}
+                "tls_cert": None, "tls_key": None, "allowed_networks": [], "trusted_lan": False, "actions": False}
     configured = read_state(profile) or {}
     if set(configured) - set(settings):
         raise ValueError("unknown dashboard profile setting")
@@ -74,6 +91,8 @@ def server_settings(args):
     settings["bind"] = str(address)
     if not isinstance(settings["trusted_lan"], bool):
         raise ValueError("trusted_lan must be true or false")
+    if not isinstance(settings["actions"], bool):
+        raise ValueError("actions must be true or false")
     if settings["trusted_lan"] and address.is_loopback:
         raise ValueError("trusted_lan requires an explicit private LAN address and client CIDRs")
     raw_networks = settings["allowed_networks"]
@@ -226,11 +245,8 @@ def container_socket(tool):
 
 
 def container_inventory(path):
-    connection = http.client.HTTPConnection("localhost", timeout=2)
+    connection = action_module().unix_connection(path, timeout=2)
     try:
-        connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        connection.sock.settimeout(2)
-        connection.sock.connect(str(path))
         connection.request("GET", "/containers/json?all=1")
         response = connection.getresponse()
         raw = response.read(LIMIT + 1)
@@ -246,10 +262,11 @@ def container_inventory(path):
         return {
             "status": "available", "truncated": len(rows) > 100,
             "items": [
-                {"ID": str(item.get("Id", ""))[:12],
+                {"ID": str(item.get("Id", ""))[:12], "id": str(item.get("Id", "")),
                  "Names": ", ".join(str(name).lstrip("/") for name in item.get("Names", [])),
                  "Image": str(item.get("Image", "")), "Status": str(item.get("Status", "")),
-                 "State": str(item.get("State", ""))}
+                 "State": str(item.get("State", "")),
+                 "protected": (item.get("Labels") or {}).get("agent-toolkit.protected") == "true"}
                 for item in rows[:100]
             ],
         }
@@ -384,7 +401,10 @@ class Collector:
                 cpu = None
                 if elapsed and before and started == before[0] and ticks >= before[1]:
                     cpu = round(100 * (ticks - before[1]) / os.sysconf("SC_CLK_TCK") / elapsed, 1)
-                rows.append({"pid": pid, "name": raw[left + 1:right][:100],
+                name = raw[left + 1:right][:100]
+                uid = directory.stat().st_uid
+                rows.append({"pid": pid, "name": name, "uid": uid, "start_time_ticks": started,
+                             "controllable": not action_module().protected_process(pid, name, uid),
                              "cpu_percent": cpu,
                              "memory_bytes": max(0, int(words[21])) * os.sysconf("SC_PAGE_SIZE")})
             except (FileNotFoundError, ProcessLookupError):
@@ -532,7 +552,7 @@ class DashboardServer(ThreadingHTTPServer):
             self.slots.release()
 
 
-def handler_for(snapshot, token):
+def handler_for(snapshot, token, controls=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agent-toolkit-dashboard"
 
@@ -556,7 +576,7 @@ def handler_for(snapshot, token):
             if self.command != "HEAD":
                 self.wfile.write(body)
 
-        def do_GET(self):
+        def origin_allowed(self, required=False):
             bind = self.server.server_address[0]
             hosts = {f"{bind}:{self.server.server_port}"}
             if ipaddress.ip_address(bind).is_loopback:
@@ -564,16 +584,22 @@ def handler_for(snapshot, token):
             scheme = "https" if self.server.tls else "http"
             host = self.headers.get("Host", "")
             origin = self.headers.get("Origin")
-            if host not in hosts or self.headers.get("Sec-Fetch-Site") == "cross-site" or (
+            return not (host not in hosts or self.headers.get("Sec-Fetch-Site") == "cross-site" or (
                 origin is not None and origin != f"{scheme}://{host}"
-            ):
+            ) or (required and origin is None))
+
+        def authorized(self):
+            authorization = self.headers.get("Authorization", "")
+            return token is None or hmac.compare_digest(authorization.encode(), ("Bearer " + token).encode())
+
+        def do_GET(self):
+            if not self.origin_allowed():
                 return self.respond(403, b'{"error":"configured same-origin requests only"}')
             route = urlsplit(self.path)
             if route.query:
                 return self.respond(404, b'{"error":"not found"}')
             if route.path == "/api/snapshot":
-                authorization = self.headers.get("Authorization", "")
-                if token is not None and not hmac.compare_digest(authorization.encode(), ("Bearer " + token).encode()):
+                if not self.authorized():
                     return self.respond(401, b'{"error":"access token required"}')
                 body = snapshot.read()
                 return self.respond(200 if body else 503, body or b'{"status":"warming_up"}')
@@ -591,12 +617,56 @@ def handler_for(snapshot, token):
             self.do_GET()
 
         def do_POST(self):
-            self.respond(405, b'{"error":"read-only dashboard"}')
+            route = urlsplit(self.path)
+            if route.path != "/api/action" or route.query:
+                return self.respond(405, b'{"error":"unsupported action route"}')
+            if not self.origin_allowed(required=True):
+                return self.respond(403, b'{"error":"same-origin action required"}')
+            if not self.authorized():
+                return self.respond(401, b'{"error":"access token required"}')
+            if controls is None:
+                return self.respond(403, b'{"error":"homelab controls are disabled"}')
+            nonce = self.headers.get("X-Action-Token", "")
+            if not hmac.compare_digest(nonce.encode(), controls.nonce.encode()):
+                return self.respond(403, b'{"error":"control session expired; refresh the page"}')
+            if self.headers.get("Content-Type", "").split(";", 1)[0].strip().lower() != "application/json":
+                return self.respond(415, b'{"error":"JSON action body required"}')
+            lengths = self.headers.get_all("Content-Length", [])
+            if len(lengths) != 1 or self.headers.get("Transfer-Encoding"):
+                return self.respond(400, b'{"error":"one explicit body length required"}')
+            try:
+                length = int(lengths[0])
+            except ValueError:
+                return self.respond(400, b'{"error":"invalid body length"}')
+            if not 0 < length <= 4096:
+                return self.respond(413, b'{"error":"action body must be1..4096bytes"}')
+            try:
+                raw = self.rfile.read(length)
+            except OSError:
+                return self.respond(408, b'{"error":"action body timed out"}')
+            if len(raw) != length:
+                return self.respond(400, b'{"error":"incomplete action body"}')
+            try:
+                payload = json.loads(raw)
+            except (ValueError, RecursionError):
+                return self.respond(400, b'{"error":"invalid JSON action"}')
+            try:
+                self.connection.settimeout(20)
+                result = controls.execute(payload)
+            except action_module().ActionError as error:
+                return self.respond(error.status, json.dumps(
+                    {"ok": False, "error": str(error), "outcome": error.outcome},
+                    ensure_ascii=True,
+                ).encode())
+            self.respond(200, json.dumps(result, ensure_ascii=True, allow_nan=False).encode())
 
-        do_PUT = do_POST
-        do_PATCH = do_POST
-        do_DELETE = do_POST
-        do_OPTIONS = do_POST
+        def unsupported(self):
+            self.respond(405, b'{"error":"use the fixed POST action endpoint"}')
+
+        do_PUT = unsupported
+        do_PATCH = unsupported
+        do_DELETE = unsupported
+        do_OPTIONS = unsupported
 
     return Handler
 
@@ -605,30 +675,37 @@ def serve(settings, token, context):
     for asset in ("index.html", "app.js", "style.css"):
         if not (ASSETS / asset).is_file():
             raise ValueError(f"dashboard asset missing: {asset}")
-    cache, stop = Snapshot(), threading.Event()
+    cache, stop, wake = Snapshot(), threading.Event(), threading.Event()
     collector = Collector()
     interval = settings["interval"]
+    controls = action_module().Controller(
+        xdg("XDG_STATE_HOME", ".local/state") / "agent-toolkit",
+        container_socket, container_inventory, lambda: collector.services(user=True), wake.set,
+    ) if settings["actions"] else None
 
     def sample():
         while not stop.is_set():
             started = time.monotonic()
             value = collector.collect()
             value.update(interval_seconds=interval, stale_after_seconds=max(20, interval * 3))
+            value["actions"] = controls.describe() if controls else {"enabled": False}
             cache.publish(value)
-            stop.wait(max(0.1, interval - (time.monotonic() - started)))
+            wake.wait(max(0.1, interval - (time.monotonic() - started)))
+            wake.clear()
 
-    server = DashboardServer((settings["bind"], settings["port"]), handler_for(cache, token),
+    server = DashboardServer((settings["bind"], settings["port"]), handler_for(cache, token, controls),
                              context, settings["allowed_networks"])
     worker = threading.Thread(target=sample, name="dashboard-sampler", daemon=True)
     worker.start()
     scheme = "https" if context else "http"
-    logging.info("Read-only dashboard listening on %s://%s:%s", scheme, settings["bind"], settings["port"])
+    logging.info("Dashboard listening on %s://%s:%s (controls=%s)", scheme, settings["bind"], settings["port"], bool(controls))
     try:
         server.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
         stop.set()
+        wake.set()
         server.server_close()
         worker.join(timeout=12)
 
