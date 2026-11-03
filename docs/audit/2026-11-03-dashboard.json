@@ -1,0 +1,99 @@
+{
+  "format_version": 1,
+  "date": "2026-11-03",
+  "scope": "Optional private server dashboard documentation and its actual CLI, browser, native-source and user-service boundaries",
+  "result": "PASS",
+  "method": "Four independent documentation personas; parent consolidated their findings in a technical-writer role. Narrow follow-ups confirmed all six remediations. This report does not certify unrelated site deployment or replace code-quality review.",
+  "reviewers": [
+    {"persona": "Junior Developer", "result": "PASS after remedies", "findings": ["A1", "A2"]},
+    {"persona": "Senior Developer", "result": "PASS after remedies", "findings": ["A3", "A4", "A5", "A6"]},
+    {"persona": "Principal Developer", "result": "PASS", "findings": []},
+    {"persona": "Project Manager", "result": "PASS", "findings": []}
+  ],
+  "actions": [
+    {
+      "id": "A1",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "A fresh shell without ~/.local/bin on PATH cannot execute the published install sequence.",
+      "remedy": "Export the installed bin directory before invoking the CLI.",
+      "evidence": "docs/dashboard.md:16; literal published install/diagnostics regression executes with fresh HOME and minimal PATH, failed before fix and passes after."
+    },
+    {
+      "id": "A2",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "Copying the diagnostics block also stopped and disabled monitoring.",
+      "remedy": "Move shutdown into its own explicitly labelled stop/disable block.",
+      "evidence": "docs/dashboard.md:96-101,120-126; executable snippet regression asserts no disable call."
+    },
+    {
+      "id": "A3",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "Healthy and configuration-error wording conflated collection success, machine health, optional visibility and startup failures.",
+      "remedy": "Define collection-only healthy, source-observation errors (exit4), startup/argument/token errors (exit3), and optional unknown sources explicitly.",
+      "evidence": "docs/dashboard.md:103-109; senior follow-up confirmed implementation agreement."
+    },
+    {
+      "id": "A4",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "Valid JSON with malformed nested maintenance fields could crash rendering rather than become an observation gap.",
+      "remedy": "Validate rendered numeric/list/admission shapes before publication and qualify that validation is not exhaustive for every nested audit-schema field.",
+      "evidence": "scripts/server-dashboard.py validate_maintenance; malformed actions, byte-count and waiting fixtures fail before fix and become explicit degraded Janitor observations after; valid control stays healthy."
+    },
+    {
+      "id": "A5",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "Coverage limits could make omitted workloads/storage look absent.",
+      "remedy": "Document loaded-unit-only inventory,250 per scope,15 processes,root plus allowlisted local filesystems up to30,and100 containers per engine; label container truncation in the UI.",
+      "evidence": "docs/dashboard.md:63-76; senior isolated rendering verified truncation label and both Node regressions passed."
+    },
+    {
+      "id": "A6",
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "Never reads arguments overstated input minimization because a container API response can contain extra command metadata.",
+      "remedy": "Distinguish excluded /proc argument/environment files from extra container fields received then discarded, never published or logged.",
+      "evidence": "docs/dashboard.md:78-80; selected container-output regression proves Command exclusion."
+    },
+    {
+      "id": "O1",
+      "class": "Operator action",
+      "status": "pre-existing, outside this change",
+      "finding": "Four existing cert-watch/log-shipper schema links still fail the strict global documentation-site build.",
+      "remedy": "Resolve those existing links when maintaining the broader documentation site. Do not treat this report or the healthy local dashboard as proof of global site deployment.",
+      "evidence": "Strict local builder and prior published docs CI report the same four warnings; this dashboard page adds none."
+    }
+  ],
+  "preserved_reservations": [
+    "History is in-memory and resets on restart.",
+    "Absent optional Podman API access is unknown, not zero containers.",
+    "Read-only is a fixed observation surface, not a read-only filesystem sandbox. User filesystem namespaces hide existing supplementary-group socket access; no group or socket permissions were changed.",
+    "Global documentation publication remains separate from verified local dashboard deployment.",
+    "Planning uses session JSON and SQL under the artifact policy; no root AGENTS.md or constitution was overwritten or invented."
+  ],
+  "validation": {
+    "python_cases": 9,
+    "node_ui_cases": 2,
+    "spec_review": "PASS, tier-1 satisfaction98/100 after mixed-scope failed-first remediation",
+    "quality_review": "PASS; reviewer ran8 Python cases,2 Node cases,syntax and isolated CLI checks. Parent additionally ran the literal-snippet case; all9 Python cases pass.",
+    "browser": "Real enabled service, desktop and390px mobile, auth/fragment removal, live metrics/services/filtering and offline stale recovery",
+    "documentation": "Published literal dashboard install/diagnostics snippets and existing cron-docs smoke",
+    "ruggedness": "One current RUGGED review with empirical field evidence"
+  },
+  "telemetry": {
+    "wall_seconds": null,
+    "allocated_lane_seconds": null,
+    "active_agent_seconds": null,
+    "parked_seconds": null,
+    "critical_path_seconds": null,
+    "timed_turns": null,
+    "missing_turns": null,
+    "timed_lanes": null,
+    "missing_lanes": null,
+    "note": "The run did not instrument the three clocks. Agent elapsed lifetimes are not substituted for active time; no speedup or billing claims are made."
+  }
+}

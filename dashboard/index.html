@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Server observatory | agent-toolkit</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <header>
+    <div><p class="eyebrow">AGENT-TOOLKIT / LIVE TELEMETRY</p><h1>Server observatory<span class="dot">.</span></h1>
+      <p class="muted" id="host">Private, read-only monitoring. No remote controls.</p></div>
+    <div class="connection"><span id="connection" class="badge">Not connected</span><p id="updated" class="muted">Waiting for access</p></div>
+  </header>
+  <main>
+    <form id="login" class="panel login">
+      <div><h2>Connect to your server</h2><p class="muted">Use the private link from <code>agent-toolkit-dashboard --url</code>, or paste its access token.</p></div>
+      <label>Access token <input id="token" type="password" autocomplete="off" required></label>
+      <button type="submit">Connect</button>
+    </form>
+    <p id="notice" role="status" aria-live="polite" hidden></p>
+    <div id="content" hidden>
+      <section class="cards" aria-label="Server overview">
+        <article class="card"><p class="eyebrow">ROOT DISK</p><strong id="disk-free">--</strong><p id="disk-detail" class="muted">Available space</p><meter id="disk-meter" max="100" aria-label="Root disk usage"></meter></article>
+        <article class="card"><p class="eyebrow">CPU</p><strong id="cpu">--</strong><p id="load" class="muted">Sampling load</p><meter id="cpu-meter" max="100" aria-label="CPU usage"></meter></article>
+        <article class="card"><p class="eyebrow">MEMORY</p><strong id="memory">--</strong><p id="memory-detail" class="muted">Available / total</p><meter id="memory-meter" max="100" aria-label="Memory usage"></meter></article>
+        <article class="card"><p class="eyebrow">SERVICES</p><strong id="service-count">--</strong><p id="failed-count" class="muted">System + user services</p></article>
+        <article class="card"><p class="eyebrow">GO CACHE</p><strong id="cache">--</strong><p id="cache-detail" class="muted">Last maintenance observation</p></article>
+        <article class="card"><p class="eyebrow">UPTIME</p><strong id="uptime">--</strong><p id="swap" class="muted">Swap usage</p></article>
+      </section>
+      <section class="panel trend">
+        <div class="section-heading"><div><p class="eyebrow">RECENT HISTORY</p><h2>Recent observations</h2></div><p class="muted"><span class="cpu-key">CPU</span> / <span class="memory-key">RAM</span> / <span class="disk-key">Disk</span></p></div>
+        <svg id="chart" viewBox="0 0 1000 130" preserveAspectRatio="none" role="img" aria-label="CPU, memory and disk usage history"></svg>
+        <p id="history-note" class="muted">History stays in memory; no metrics database grows on disk.</p>
+      </section>
+      <div class="columns">
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2>Janitor &amp; build guard</h2></div><span id="maintenance-status" class="badge">Unknown</span></div>
+          <dl id="maintenance-summary"></dl><div id="maintenance-actions"></div><details><summary>Protected work &amp; deferred cleanup</summary><ul id="protected"></ul></details>
+        </section>
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">STORAGE</p><h2>Mounted filesystems</h2></div></div><div class="table-wrap"><table><thead><tr><th>Mount</th><th>Available</th><th>Used</th><th>Inodes</th></tr></thead><tbody id="filesystems"></tbody></table></div>
+          <h3>Network throughput</h3><div id="network" class="table-wrap"></div>
+        </section>
+      </div>
+      <section class="panel"><div class="section-heading"><div><p class="eyebrow">SERVICE INVENTORY</p><h2>What is running</h2></div><div class="filters"><label class="sr-only" for="service-search">Filter services</label><input id="service-search" placeholder="Search services..." type="search"><label class="sr-only" for="service-state">Service state</label><select id="service-state"><option value="live">Active + failed</option><option value="all">All loaded</option><option value="failed">Failed only</option></select></div></div>
+        <p id="services-note" class="muted">System and user scopes are listed separately.</p>
+        <div class="table-wrap service-table"><table><thead><tr><th>Service</th><th>Scope</th><th>State</th><th>Description</th></tr></thead><tbody id="services"></tbody></table></div>
+      </section>
+      <div class="columns">
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">RESOURCE CONSUMERS</p><h2>Top processes</h2></div></div><p id="process-note" class="muted">CPU is per process; command arguments and environments are never read.</p>
+          <div class="table-wrap"><table><thead><tr><th>Process</th><th>PID</th><th>CPU</th><th>RAM</th></tr></thead><tbody id="processes"></tbody></table></div>
+        </section>
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">CONTAINERS</p><h2>Running workloads</h2></div></div><div id="containers"></div></section>
+      </div>
+      <section id="errors-panel" class="panel" hidden><h2>Observation gaps</h2><p class="muted">Unavailable data is not a healthy zero.</p><ul id="errors"></ul></section>
+    </div>
+  </main>
+  <footer>Read-only by design. Nominal 5-second refresh. Loopback + private access token. No third-party assets or telemetry.</footer>
+</body>
+</html>

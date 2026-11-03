@@ -1,0 +1,589 @@
+#!/usr/bin/env python3
+"""Private, read-only Linux server dashboard. Python standard library only."""
+
+import argparse
+from collections import deque
+import datetime as dt
+import hmac
+import http.client
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import json
+import logging
+import math
+import os
+from pathlib import Path
+import re
+import secrets
+import shutil
+import signal
+import socket
+import stat
+import subprocess
+import sys
+import threading
+import time
+from urllib.parse import urlsplit
+
+
+VERSION = "0.1.0"
+LIMIT = 2 * 1024 * 1024
+ASSETS = Path(__file__).resolve().parent.parent / "dashboard"
+CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "loopback-only",
+                       "read-only", "snapshot-json", "systemd-services"])
+
+
+def utc():
+    return dt.datetime.now(dt.timezone.utc).isoformat()
+
+
+def xdg(variable, fallback):
+    return Path(os.environ.get(variable, str(Path.home() / fallback)))
+
+
+def token_path():
+    return xdg("XDG_CONFIG_HOME", ".config") / "agent-toolkit/dashboard-token"
+
+
+def read_token(path):
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+        raise ValueError("dashboard token must be an owned, private regular file (chmod 600)")
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(fd) as source:
+        info = os.fstat(source.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_mode & 0o077:
+            raise ValueError("dashboard token permissions changed")
+        value = source.read(102).strip()
+    if not re.fullmatch(r"[A-Za-z0-9_-]{40,100}", value):
+        raise ValueError("invalid dashboard token; restore the private token file")
+    return value
+
+
+def initialize_token(path):
+    path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+    if not path.exists() and not path.is_symlink():
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as out:
+            out.write(secrets.token_urlsafe(32) + "\n")
+            out.flush()
+            os.fsync(out.fileno())
+    read_token(path)
+
+
+def command(args):
+    result = subprocess.run(args, capture_output=True, text=True, timeout=2, check=False)
+    if result.returncode:
+        raise ValueError(f"{args[0]} exited {result.returncode}: {result.stderr.strip()[:160]}")
+    if len(result.stdout) > LIMIT:
+        raise ValueError(f"{args[0]} output exceeds the monitoring limit")
+    return result.stdout
+
+
+def read_state(path):
+    try:
+        with path.open("rb") as source:
+            raw = source.read(LIMIT + 1)
+    except FileNotFoundError:
+        return None
+    if len(raw) > LIMIT:
+        raise ValueError(f"{path.name} exceeds the monitoring limit")
+    def reject_constant(value):
+        raise ValueError(f"{path.name} contains a non-finite JSON number")
+    def finite_float(raw):
+        value = float(raw)
+        if not math.isfinite(value):
+            reject_constant(raw)
+        return value
+    try:
+        value = json.loads(raw, parse_constant=reject_constant, parse_float=finite_float)
+    except RecursionError as error:
+        raise ValueError(f"{path.name} is nested too deeply") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"{path.name} must contain a JSON object")
+    return value
+
+
+def validate_maintenance(value):
+    if value is None:
+        return value
+    def number(item):
+        return item is None or (
+            isinstance(item, (int, float)) and not isinstance(item, bool)
+            and (isinstance(item, int) or math.isfinite(item)) and item >= 0
+        )
+    for key in ("cache_bytes", "cache_budget_bytes", "observed_reclaimed_bytes", "cooldown_remaining_sec"):
+        if key in value and not number(value[key]):
+            raise ValueError(f"invalid maintenance field: {key}")
+    for key in ("actions", "workspaces", "caches", "errors"):
+        if key in value and (
+            not isinstance(value[key], list) or any(not isinstance(item, dict) for item in value[key])
+        ):
+            raise ValueError(f"invalid maintenance list: {key}")
+    for item in value.get("actions", []):
+        if not number(item.get("removed_bytes")):
+            raise ValueError("invalid cleanup byte count")
+    admission = value.get("build_admission")
+    if admission is not None and (
+        not isinstance(admission, dict) or not isinstance(admission.get("waiting", []), list)
+    ):
+        raise ValueError("invalid build-admission observation")
+    return value
+
+
+def container_socket(tool):
+    configured = os.environ.get("DOCKER_HOST" if tool == "docker" else "CONTAINER_HOST", "")
+    if configured:
+        if not configured.startswith("unix:///"):
+            raise ValueError(f"{tool} monitoring supports local Unix sockets only")
+        candidates = [Path(configured.removeprefix("unix://"))]
+    else:
+        runtime = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+        candidates = ([runtime / "docker.sock", Path("/var/run/docker.sock")] if tool == "docker"
+                      else [runtime / "podman/podman.sock"])
+    for path in candidates:
+        try:
+            info = path.stat()
+        except FileNotFoundError:
+            continue
+        if not stat.S_ISSOCK(info.st_mode):
+            raise ValueError(f"{tool} endpoint is not a Unix socket")
+        return path
+    return None
+
+
+def container_inventory(path):
+    connection = http.client.HTTPConnection("localhost", timeout=2)
+    try:
+        connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.sock.settimeout(2)
+        connection.sock.connect(str(path))
+        connection.request("GET", "/containers/json")
+        response = connection.getresponse()
+        raw = response.read(LIMIT + 1)
+        if response.status != 200 or len(raw) > LIMIT:
+            raise ValueError(f"container socket returned HTTP {response.status} or oversized data")
+        rows = json.loads(raw)
+        if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
+            raise ValueError("invalid container inventory")
+        if any(not isinstance(item.get("Names", []), list)
+               or any(not isinstance(name, str) for name in item.get("Names", []))
+               for item in rows):
+            raise ValueError("invalid container names")
+        return {
+            "status": "available", "truncated": len(rows) > 100,
+            "items": [
+                {"ID": str(item.get("Id", ""))[:12],
+                 "Names": ", ".join(str(name).lstrip("/") for name in item.get("Names", [])),
+                 "Image": str(item.get("Image", "")), "Status": str(item.get("Status", ""))}
+                for item in rows[:100]
+            ],
+        }
+    finally:
+        connection.close()
+
+
+def cpu_sample(text):
+    lines = text.splitlines()
+    fields = lines[0].split() if lines else []
+    if not fields or fields[0] != "cpu" or len(fields) < 6:
+        raise ValueError("invalid aggregate CPU counters")
+    ticks = [int(value) for value in fields[1:9]]
+    return sum(ticks), ticks[3] + ticks[4]
+
+
+def cpu_percent(previous, current):
+    if previous is None:
+        return None
+    elapsed = current[0] - previous[0]
+    idle = current[1] - previous[1]
+    if elapsed <= 0 or idle < 0 or idle > elapsed:
+        return None
+    return round(100 * (elapsed - idle) / elapsed, 1)
+
+
+class Collector:
+    def __init__(self, state=None, proc=Path("/proc")):
+        self.proc = proc
+        self.state = state or xdg("XDG_STATE_HOME", ".local/state")
+        self.previous_cpu = None
+        self.previous_network = {}
+        self.previous_processes = {}
+        self.previous_time = None
+        self.history = deque(maxlen=360)
+
+    def system(self, now):
+        counters = cpu_sample((self.proc / "stat").read_text())
+        percent = cpu_percent(self.previous_cpu, counters)
+        self.previous_cpu = counters
+        memory = {}
+        for line in (self.proc / "meminfo").read_text().splitlines():
+            key, _, value = line.partition(":")
+            words = value.split()
+            if words:
+                memory[key] = int(words[0]) * 1024
+        required = ("MemTotal", "MemAvailable", "SwapTotal", "SwapFree")
+        if any(key not in memory for key in required) or memory["MemTotal"] <= 0:
+            raise ValueError("kernel memory counters unavailable")
+        return {
+            "cpu_percent": percent, "cpu_count": os.cpu_count(),
+            "load_average": list(os.getloadavg()),
+            "memory_total_bytes": memory["MemTotal"],
+            "memory_available_bytes": memory["MemAvailable"],
+            "memory_used_percent": round(100 * (1 - memory["MemAvailable"] / memory["MemTotal"]), 1),
+            "swap_total_bytes": memory["SwapTotal"],
+            "swap_used_bytes": memory["SwapTotal"] - memory["SwapFree"],
+            "uptime_seconds": float((self.proc / "uptime").read_text().split()[0]),
+        }
+
+    def filesystems(self):
+        mounts = [("/", "root")]
+        seen = {os.stat("/").st_dev}
+        for line in (self.proc / "self/mountinfo").read_text().splitlines():
+            left, separator, right = line.partition(" - ")
+            if not separator:
+                continue
+            fields = left.split()
+            kind = right.split()[0]
+            if kind not in {"ext2", "ext3", "ext4", "xfs", "btrfs", "zfs", "f2fs", "vfat", "exfat", "ntfs3"}:
+                continue
+            mount = re.sub(r"\\([0-7]{3})", lambda match: chr(int(match[1], 8)), fields[4])
+            device = os.stat(mount).st_dev
+            if device not in seen:
+                mounts.append((mount, kind))
+                seen.add(device)
+        result = []
+        for mount, kind in mounts[:30]:
+            value = os.statvfs(mount)
+            total = value.f_blocks * value.f_frsize
+            used = (value.f_blocks - value.f_bfree) * value.f_frsize
+            available = value.f_bavail * value.f_frsize
+            result.append({
+                "mount": mount, "type": kind, "total_bytes": total,
+                "used_bytes": used, "available_bytes": available,
+                "used_percent": round(100 * used / (used + available), 1) if used + available else None,
+                "inode_used_percent": round(100 * (1 - value.f_ffree / value.f_files), 1) if value.f_files else None,
+            })
+        return result
+
+    def network(self, now):
+        current, result = {}, []
+        elapsed = now - self.previous_time if self.previous_time is not None else None
+        for line in (self.proc / "net/dev").read_text().splitlines()[2:]:
+            name, _, raw = line.partition(":")
+            name = name.strip()
+            if name == "lo":
+                continue
+            fields = raw.split()
+            if len(fields) < 9:
+                raise ValueError("invalid network counters")
+            counters = int(fields[0]), int(fields[8])
+            current[name] = counters
+            before = self.previous_network.get(name)
+            rates = [
+                round((value - old) / elapsed) if elapsed and value >= old else None
+                for value, old in zip(counters, before)
+            ] if before else [None, None]
+            result.append({"name": name, "received_bytes_per_second": rates[0],
+                           "sent_bytes_per_second": rates[1]})
+        self.previous_network = current
+        return result[:40]
+
+    def processes(self, now):
+        rows, current = [], {}
+        unreadable = 0
+        elapsed = now - self.previous_time if self.previous_time is not None else None
+        for directory in self.proc.iterdir():
+            if not directory.name.isdigit():
+                continue
+            try:
+                raw = (directory / "stat").read_text()
+                left, right = raw.index("("), raw.rindex(")")
+                words = raw[right + 2:].split()
+                if len(words) < 22:
+                    raise ValueError("invalid process counters")
+                ticks = int(words[11]) + int(words[12])
+                started = int(words[19])
+                pid = int(directory.name)
+                current[pid] = started, ticks
+                before = self.previous_processes.get(pid)
+                cpu = None
+                if elapsed and before and started == before[0] and ticks >= before[1]:
+                    cpu = round(100 * (ticks - before[1]) / os.sysconf("SC_CLK_TCK") / elapsed, 1)
+                rows.append({"pid": pid, "name": raw[left + 1:right][:100],
+                             "cpu_percent": cpu,
+                             "memory_bytes": max(0, int(words[21])) * os.sysconf("SC_PAGE_SIZE")})
+            except (FileNotFoundError, ProcessLookupError):
+                continue
+            except (PermissionError, ValueError):
+                unreadable += 1
+        self.previous_processes = current
+        rows.sort(key=lambda row: (-(row["cpu_percent"] or 0), -row["memory_bytes"], row["pid"]))
+        return {"items": rows[:15], "total_observed": len(rows), "unreadable": unreadable}
+
+    def services(self, user=False):
+        args = ["systemctl", *(["--user"] if user else []),
+                "list-units", "--all", "--type=service", "--no-pager", "--plain", "--output=json"]
+        rows = json.loads(command(args))
+        if not isinstance(rows, list) or any(
+            not isinstance(row, dict) or not all(isinstance(row.get(key), str)
+                                                for key in ("unit", "active", "sub", "description"))
+            for row in rows
+        ):
+            raise ValueError("invalid systemd service inventory")
+        scope = "user" if user else "system"
+        result = [{key: row[key] for key in ("unit", "active", "sub", "description")} | {"scope": scope}
+                  for row in rows]
+        result.sort(key=lambda row: ({"failed": 0, "active": 1}.get(row["active"], 2), row["unit"]))
+        return {"items": result[:250], "total": len(result), "truncated": len(result) > 250}
+
+    def containers(self, tool):
+        path = container_socket(tool)
+        if path is None:
+            if not shutil.which(tool):
+                return {"status": "not_installed", "items": []}
+            return {"status": "socket_unavailable", "items": [],
+                    "detail": "Local API socket unavailable; container state is unknown."}
+        return container_inventory(path)
+
+    def maintenance(self):
+        result = {}
+        for name, path in (
+            ("maintenance", self.state / "janitor/maintenance-last.json"),
+            ("last_run", self.state / "janitor/last-run.json"),
+            ("cron", self.state / "agent-toolkit/cron/system-janitor.json"),
+        ):
+            result[name] = read_state(path)
+        result["maintenance"] = validate_maintenance(result["maintenance"])
+        result["timer"] = dict(
+            line.split("=", 1) for line in command([
+                "systemctl", "--user", "show", "system-janitor-catchup.timer",
+                "-p", "ActiveState", "-p", "NextElapseUSecRealtime", "-p", "LastTriggerUSec",
+            ]).splitlines() if "=" in line
+        )
+        return result
+
+    def collect(self):
+        now = time.monotonic()
+        errors = []
+
+        def observe(name, action):
+            try:
+                return action()
+            except (OSError, ValueError, subprocess.SubprocessError, http.client.HTTPException) as error:
+                errors.append({"source": name, "detail": str(error)[:240]})
+                return None
+
+        snapshot = {
+            "version": 1, "generated_at": utc(), "host": socket.gethostname(),
+            "system": observe("system", lambda: self.system(now)),
+            "filesystems": observe("filesystems", self.filesystems),
+            "network": observe("network", lambda: self.network(now)),
+            "processes": observe("processes", lambda: self.processes(now)),
+            "system_services": observe("system_services", self.services),
+            "user_services": observe("user_services", lambda: self.services(user=True)),
+            "docker": observe("docker", lambda: self.containers("docker")),
+            "podman": observe("podman", lambda: self.containers("podman")),
+            "janitor": observe("janitor", self.maintenance),
+            "errors": errors,
+        }
+        self.previous_time = now
+        snapshot["status"] = "degraded" if errors else "healthy"
+        system = snapshot["system"] or {}
+        disks = snapshot["filesystems"] or []
+        self.history.append({
+            "ts": snapshot["generated_at"], "cpu": system.get("cpu_percent"),
+            "memory": system.get("memory_used_percent"),
+            "disk": disks[0]["used_percent"] if disks else None,
+        })
+        snapshot["history"] = list(self.history)
+        return snapshot
+
+
+class Snapshot:
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.body = None
+
+    def publish(self, value):
+        body = json.dumps(value, ensure_ascii=True, allow_nan=False).encode()
+        with self.lock:
+            self.body = body
+
+    def read(self):
+        with self.lock:
+            return self.body
+
+
+class DashboardServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def __init__(self, address, handler):
+        self.slots = threading.BoundedSemaphore(12)
+        super().__init__(address, handler)
+
+    def get_request(self):
+        connection, address = super().get_request()
+        connection.settimeout(5)
+        return connection, address
+
+    def process_request(self, request, client_address):
+        if not self.slots.acquire(blocking=False):
+            request.close()
+            return
+        try:
+            super().process_request(request, client_address)
+        except RuntimeError:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
+
+
+def handler_for(snapshot, token):
+    class Handler(BaseHTTPRequestHandler):
+        server_version = "agent-toolkit-dashboard"
+
+        def log_message(self, fmt, *args):
+            logging.info("HTTP %s %s", self.command, self.path.split("?", 1)[0])
+
+        def respond(self, code, body, content_type="application/json"):
+            self.send_response(code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            if code == 405:
+                self.send_header("Allow", "GET, HEAD")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Content-Security-Policy",
+                             "default-src 'none'; script-src 'self'; style-src 'self'; "
+                             "connect-src 'self'; img-src 'self' data:; "
+                             "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+
+        def do_GET(self):
+            hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+            host = self.headers.get("Host", "")
+            origin = self.headers.get("Origin")
+            if host not in hosts or self.headers.get("Sec-Fetch-Site") == "cross-site" or (
+                origin is not None and origin not in {f"http://{host}", f"https://{host}"}
+            ):
+                return self.respond(403, b'{"error":"local same-origin requests only"}')
+            route = urlsplit(self.path)
+            if route.query:
+                return self.respond(404, b'{"error":"not found"}')
+            if route.path == "/api/snapshot":
+                authorization = self.headers.get("Authorization", "")
+                if not hmac.compare_digest(authorization.encode(), ("Bearer " + token).encode()):
+                    return self.respond(401, b'{"error":"access token required"}')
+                body = snapshot.read()
+                return self.respond(200 if body else 503, body or b'{"status":"warming_up"}')
+            assets = {
+                "/": ("index.html", "text/html; charset=utf-8"),
+                "/app.js": ("app.js", "text/javascript; charset=utf-8"),
+                "/style.css": ("style.css", "text/css; charset=utf-8"),
+            }
+            if route.path not in assets:
+                return self.respond(404, b'{"error":"not found"}')
+            filename, kind = assets[route.path]
+            return self.respond(200, (ASSETS / filename).read_bytes(), kind)
+
+        def do_HEAD(self):
+            self.do_GET()
+
+        def do_POST(self):
+            self.respond(405, b'{"error":"read-only dashboard"}')
+
+        do_PUT = do_POST
+        do_PATCH = do_POST
+        do_DELETE = do_POST
+        do_OPTIONS = do_POST
+
+    return Handler
+
+
+def serve(port, interval, token):
+    for asset in ("index.html", "app.js", "style.css"):
+        if not (ASSETS / asset).is_file():
+            raise ValueError(f"dashboard asset missing: {asset}")
+    cache, stop = Snapshot(), threading.Event()
+    collector = Collector()
+
+    def sample():
+        while not stop.is_set():
+            started = time.monotonic()
+            value = collector.collect()
+            value.update(interval_seconds=interval, stale_after_seconds=max(20, interval * 3))
+            cache.publish(value)
+            stop.wait(max(0.1, interval - (time.monotonic() - started)))
+
+    server = DashboardServer(("127.0.0.1", port), handler_for(cache, token))
+    worker = threading.Thread(target=sample, name="dashboard-sampler", daemon=True)
+    worker.start()
+    logging.info("Read-only dashboard listening on http://127.0.0.1:%s", port)
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        stop.set()
+        server.server_close()
+        worker.join(timeout=12)
+
+
+class Arguments(argparse.ArgumentParser):
+    def error(self, message):
+        raise ValueError(message)
+
+
+def main():
+    parser = Arguments(description=__doc__)
+    actions = parser.add_mutually_exclusive_group()
+    actions.add_argument("--init", action="store_true", help="create a private access token")
+    actions.add_argument("--url", action="store_true", help="print the private browser link; do not share it")
+    actions.add_argument("--snapshot", action="store_true", help="print one read-only JSON observation")
+    actions.add_argument("--version", action="store_true")
+    parser.add_argument("--json", action="store_true", help="machine output with --version or --snapshot")
+    parser.add_argument("--port", type=int, default=8787)
+    parser.add_argument("--interval", type=int, default=5, help="nominal sampling interval, 2..60 seconds")
+    args = parser.parse_args()
+    if not 1024 <= args.port <= 65535 or not 2 <= args.interval <= 60:
+        raise ValueError("port must be 1024..65535 and interval must be 2..60 seconds")
+    if args.json and not (args.version or args.snapshot):
+        raise ValueError("--json requires --version or --snapshot")
+    if args.version:
+        value = {"name": "agent-toolkit-dashboard", "version": VERSION, "capabilities": CAPABILITIES}
+        print(json.dumps(value) if args.json else f"{value['name']} {VERSION}")
+    elif args.init:
+        initialize_token(token_path())
+        print(json.dumps({"initialized": True, "token_path": str(token_path())}))
+    elif args.snapshot:
+        value = Collector().collect()
+        print(json.dumps(value, ensure_ascii=True, allow_nan=False))
+        return 4 if value["status"] == "degraded" else 0
+    else:
+        try:
+            token = read_token(token_path())
+        except FileNotFoundError as error:
+            raise ValueError("run --init once to create the private dashboard token") from error
+        if args.url:
+            print(f"http://127.0.0.1:{args.port}/#token={token}")
+        else:
+            signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+            serve(args.port, args.interval, token)
+    return 0
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+    try:
+        sys.exit(main())
+    except (OSError, ValueError) as error:
+        print(f"[dashboard] {error}", file=sys.stderr)
+        sys.exit(3)

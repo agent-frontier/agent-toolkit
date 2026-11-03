@@ -78,6 +78,7 @@ nav:
       - Cert-watch install: cert-watch-install.md
       - Log-shipper install: log-shipper-install.md
       - Cron troubleshooting: cron-troubleshooting.md
+      - Private server dashboard: dashboard.md
   - Configuration:
       - Janitor: configuration.md
       - Updater: updater-configuration.md

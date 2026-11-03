@@ -1,0 +1,21 @@
+[Unit]
+Description=Private read-only agent-toolkit server dashboard
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/agent-toolkit-dashboard
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=15s
+Environment=PYTHONDONTWRITEBYTECODE=1
+NoNewPrivileges=true
+# Filesystem namespacing in a user unit remaps supplementary groups and
+# prevents read-only access to existing Docker sockets. Do not grant new
+# socket permissions or use privileged container launchers to work around it.
+UMask=0077
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=128M
+TasksMax=32
+
+[Install]
+WantedBy=default.target
