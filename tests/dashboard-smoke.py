@@ -156,6 +156,8 @@ class AccessTests(unittest.TestCase):
                 dict(valid, allowed_networks=[]), dict(valid, tls_key=None),
                 dict(valid, tls_cert=None, tls_key=None),
                 dict(valid, unexpected=True), {"tls_cert": False, "tls_key": False},
+                {"trusted_lan": True}, dict(valid, trusted_lan="yes"),
+                dict(valid, trusted_lan=True, tls_cert=None, tls_key=None),
             ):
                 profile.write_text(json.dumps(invalid))
                 with self.subTest(invalid=list(invalid)):
@@ -174,6 +176,13 @@ class AccessTests(unittest.TestCase):
                 env=dict(os.environ), text=True,
             )
             self.assertTrue(output.startswith("https://192.168.1.10:8787/#token="))
+            profile.write_text(json.dumps(dict(valid, trusted_lan=True)))
+            d.token_path().unlink()
+            output = subprocess.check_output(
+                [str(ROOT / "scripts/server-dashboard.py"), "--url"],
+                env=dict(os.environ), text=True,
+            )
+            self.assertEqual(output.strip(), "https://192.168.1.10:8787/")
 
     def test_real_https_auth_origin_acl_and_stalled_handshake(self):
         # TLS negotiation belongs in bounded workers, never the accept loop.
@@ -205,6 +214,10 @@ class AccessTests(unittest.TestCase):
             self.assertEqual(request(dict(auth, Host="foreign.invalid")), 403)
             self.assertEqual(request(dict(auth, Origin=f"http://127.0.0.1:{server.server_port}")), 403)
             self.assertEqual(request(dict(auth, Origin=f"https://127.0.0.1:{server.server_port}")), 200)
+            server.RequestHandlerClass = d.handler_for(cache, None)
+            self.assertEqual(request(), 200)
+            self.assertEqual(request({"Host": "foreign.invalid"}), 403)
+            self.assertEqual(request({"Origin": "https://foreign.invalid"}), 403)
             server.allowed_networks = [d.ipaddress.ip_network("192.168.1.0/24")]
             with self.assertRaises((OSError, http.client.HTTPException)):
                 request(auth)

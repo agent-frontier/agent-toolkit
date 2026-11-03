@@ -81,9 +81,18 @@ certificate needs a one-time browser trust decision: verify its fingerprint
 against the server before trusting it, or use a certificate your phone already
 trusts. Inspect the fingerprint with
 `openssl x509 -in "$cfg/dashboard-lan.crt" -noout -fingerprint -sha256`.
-The application still requires the token after TLS trust. Clients outside the
+By default, the application still requires the token after TLS trust. Clients outside the
 configured subnets, wrong Host/Origin values and public/wildcard binds are denied.
 The dashboard does not enable a firewall, router forwarding or public access.
+
+For a trusted home LAN where the plain URL should open immediately, add
+`"trusted_lan": true` to this profile and restart the dashboard. **Anyone on the
+allowed subnet can then view the read-only stats without logging in.** HTTPS,
+explicit private binding, client CIDRs, Host/Origin checks and the absence of
+control endpoints remain mandatory. No token file is needed in this mode;
+`--url` prints the plain address. Removing the setting restores token access.
+The browser attempts to load the dashboard automatically and only shows the
+login prompt when the server actually requires one.
 
 If the address comes from DHCP, reserve it in your router to keep the bookmark
 stable. A changed/unavailable bind address fails visibly rather than silently

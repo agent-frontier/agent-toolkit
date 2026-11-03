@@ -170,4 +170,4 @@ async function refresh() {
 $("login").addEventListener("submit", event => { event.preventDefault(); token = $("token").value.trim(); $("token").value = ""; refresh(); });
 $("service-search").addEventListener("input", serviceRows);
 $("service-state").addEventListener("change", serviceRows);
-if (token) refresh();
+refresh();

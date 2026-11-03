@@ -15,7 +15,7 @@
     <div class="connection"><span id="connection" class="badge">Not connected</span><p id="updated" class="muted">Waiting for access</p></div>
   </header>
   <main>
-    <form id="login" class="panel login">
+    <form id="login" class="panel login" hidden>
       <div><h2>Connect to your server</h2><p class="muted">Use the private link from <code>agent-toolkit-dashboard --url</code>, or paste its access token.</p></div>
       <label>Access token <input id="token" type="password" autocomplete="off" required></label>
       <button type="submit">Connect</button>
@@ -56,6 +56,6 @@
       <section id="errors-panel" class="panel" hidden><h2>Observation gaps</h2><p class="muted">Unavailable data is not a healthy zero.</p><ul id="errors"></ul></section>
     </div>
   </main>
-  <footer>Read-only by design. Nominal 5-second refresh. Private token access via local SSH or LAN HTTPS. No third-party assets or telemetry.</footer>
+  <footer>Read-only by design. Nominal 5-second refresh. Restricted localhost or LAN HTTPS access. No third-party assets or telemetry.</footer>
 </body>
 </html>

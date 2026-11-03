@@ -27,11 +27,11 @@ import time
 from urllib.parse import urlsplit
 
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 LIMIT = 2 * 1024 * 1024
 ASSETS = Path(__file__).resolve().parent.parent / "dashboard"
 CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "lan-https", "loopback-only",
-                       "read-only", "snapshot-json", "systemd-services"])
+                       "read-only", "snapshot-json", "systemd-services", "trusted-lan-readonly"])
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
@@ -51,7 +51,7 @@ def token_path():
 def server_settings(args):
     profile = xdg("XDG_CONFIG_HOME", ".config") / "agent-toolkit/dashboard.json"
     settings = {"bind": "127.0.0.1", "port": 8787, "interval": 5,
-                "tls_cert": None, "tls_key": None, "allowed_networks": []}
+                "tls_cert": None, "tls_key": None, "allowed_networks": [], "trusted_lan": False}
     configured = read_state(profile) or {}
     if set(configured) - set(settings):
         raise ValueError("unknown dashboard profile setting")
@@ -72,6 +72,10 @@ def server_settings(args):
     ):
         raise ValueError("bind must be loopback or one RFC1918 LAN IPv4 address, never wildcard/public")
     settings["bind"] = str(address)
+    if not isinstance(settings["trusted_lan"], bool):
+        raise ValueError("trusted_lan must be true or false")
+    if settings["trusted_lan"] and address.is_loopback:
+        raise ValueError("trusted_lan requires an explicit private LAN address and client CIDRs")
     raw_networks = settings["allowed_networks"]
     if not isinstance(raw_networks, list) or any(not isinstance(value, str) for value in raw_networks):
         raise ValueError("allowed_networks must be a list of private IPv4 CIDRs")
@@ -568,7 +572,7 @@ def handler_for(snapshot, token):
                 return self.respond(404, b'{"error":"not found"}')
             if route.path == "/api/snapshot":
                 authorization = self.headers.get("Authorization", "")
-                if not hmac.compare_digest(authorization.encode(), ("Bearer " + token).encode()):
+                if token is not None and not hmac.compare_digest(authorization.encode(), ("Bearer " + token).encode()):
                     return self.respond(401, b'{"error":"access token required"}')
                 body = snapshot.read()
                 return self.respond(200 if body else 503, body or b'{"status":"warming_up"}')
@@ -663,13 +667,16 @@ def main():
     else:
         settings = server_settings(args)
         context = tls_context(settings)
-        try:
-            token = read_token(token_path())
-        except FileNotFoundError as error:
-            raise ValueError("run --init once to create the private dashboard token") from error
+        token = None
+        if not settings["trusted_lan"]:
+            try:
+                token = read_token(token_path())
+            except FileNotFoundError as error:
+                raise ValueError("run --init once to create the private dashboard token") from error
         if args.url:
             scheme = "https" if context else "http"
-            print(f"{scheme}://{settings['bind']}:{settings['port']}/#token={token}")
+            fragment = f"#token={token}" if token is not None else ""
+            print(f"{scheme}://{settings['bind']}:{settings['port']}/{fragment}")
         else:
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
             serve(settings, token, context)

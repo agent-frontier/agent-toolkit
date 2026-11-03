@@ -6,6 +6,7 @@ const vm = require("node:vm");
 
 function application() {
   const nodes = new Map();
+  const requests = [];
   function element() {
     return {
       value: "", children: [], textContent: "",
@@ -20,6 +21,8 @@ function application() {
   };
   const context = vm.createContext({
     document, URLSearchParams, location: { hash: "" },
+    AbortSignal, clearTimeout() {},
+    fetch(url) { requests.push(url); return new Promise(() => {}); },
     sessionStorage: { getItem() { return null; } },
     fixture: {
       system_services: { items: [{ unit: "active-system.service", scope: "system", active: "active", sub: "running", description: "system worker" }] },
@@ -28,8 +31,13 @@ function application() {
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/app.js"), "utf8"), context);
   document.getElementById("service-state").value = "live";
-  return { nodes, context };
+  return { nodes, context, requests };
 }
+
+test("opening the plain URL requests data without a token or a terminal command", () => {
+  const { requests } = application();
+  assert.deepEqual(requests, ["/api/snapshot"]);
+});
 
 test("failed user services stay above active system services", () => {
   // Per-scope sorting is insufficient when the UI merges both inventories.
