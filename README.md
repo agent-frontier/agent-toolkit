@@ -80,7 +80,8 @@ After install:
 
 ```bash
 system-janitor --doctor          # self-check: are we wired up correctly?
-system-janitor --dry-run         # preview cleanup
+system-janitor --dry-run -v      # preview targets and sizes
+system-janitor -v                # watch real cleanup and reclaimed space
 system-updater --dry-run         # preview package updates
 ```
 
@@ -156,7 +157,7 @@ system-janitor doctor: healthy (exit 0)
 ### `system-janitor --version --json`
 
 ```json
-{"name":"system-janitor","version":"0.2.0","capabilities":["aged-logs","doctor","doctor-json","extra-cleanup-globs","health","health-acknowledge","health-json","idle-status","json-schemas","last-run-sections","only","podman-prune","report","report-bytes","report-json","schema-aliases","toolkit-manifest","version","version-json"],"toolkit":{"name":"agent-toolkit","repo":"https://github.com/agent-frontier/agent-toolkit","tools":["cert-watch","log-shipper","system-janitor","system-updater"]}}
+{"name":"system-janitor","version":"0.2.0","capabilities":["aged-logs","doctor","doctor-json","extra-cleanup-globs","health","health-acknowledge","health-json","idle-status","json-schemas","last-run-sections","live-output","only","podman-prune","report","report-bytes","report-json","schema-aliases","toolkit-manifest","version","version-json"],"toolkit":{"name":"agent-toolkit","repo":"https://github.com/agent-frontier/agent-toolkit","tools":["cert-watch","log-shipper","system-janitor","system-updater"]}}
 ```
 
 ## Where to go next

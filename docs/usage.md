@@ -17,6 +17,27 @@ system-janitor --dry-run
 `--dry-run` still reports item counts and pre-state, so you can review
 exactly what a real run would touch.
 
+## Watch cleanup live
+
+Terminal runs automatically show numbered sections, cleanup targets with
+allocated sizes, live command output, and reclaimed-space totals. Use
+`--verbose` (`-v`) to keep this output in pipes or non-interactive SSH:
+
+```bash
+system-janitor --dry-run --verbose   # inspect targets; nothing deleted
+system-janitor --verbose            # real cleanup, logged and streamed
+```
+
+`--quiet` (`-q`) writes only to the log; cron and redirected runs stay quiet
+by default. The last `-v`/`-q` wins. Color is terminal-only; `NO_COLOR=1`
+disables it. JSON probes are unchanged.
+
+Target sizes are allocated usage, **not guaranteed savings**. Reclaimed
+totals measure the observed change on `/`, so concurrent writes, other
+filesystems, and shared or open files can affect them. Dry-runs always
+report zero reclaimed space. Failed removals appear as warnings in stdout
+and the audit trail; check `warning sections` before trusting the total.
+
 ## Targeted cleanup with `--only`
 
 `--only` runs just the named section(s) and silently skips the rest.

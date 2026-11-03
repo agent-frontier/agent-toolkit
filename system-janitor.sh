@@ -52,6 +52,9 @@ DEFAULT_CONFIG="${XDG_CONFIG_HOME}/system-janitor/config"
 # ── CLI flags ──────────────────────────────────────────────────────────
 CONFIG_FILE=""
 DRY_RUN="${JANITOR_DRY_RUN:-0}"
+# ── --verbose / --quiet flags ─────────────────────────────────────────
+OUTPUT_MODE=auto
+# ── end --verbose / --quiet flags ─────────────────────────────────────
 SHOW_HELP=0
 DO_REPORT=0
 REPORT_JSON=0
@@ -85,6 +88,10 @@ while [ $# -gt 0 ]; do
     --config)     CONFIG_FILE="$2"; shift 2 ;;
     --config=*)   CONFIG_FILE="${1#*=}"; shift ;;
     --dry-run|-n) DRY_RUN=1; shift ;;
+    # ── --verbose / --quiet flags ──
+    --verbose|-v) OUTPUT_MODE=verbose; shift ;;
+    --quiet|-q)   OUTPUT_MODE=quiet; shift ;;
+    # ── end --verbose / --quiet flags ──
     --report)     DO_REPORT=1; shift ;;
     # ── --health flag ──
     --health)     DO_HEALTH=1; shift ;;
@@ -180,6 +187,7 @@ system-janitor — disk-cleanup sweep with audit-grade logging.
 
 USAGE:
   system-janitor [--config <path>] [--dry-run] [--only <list>]
+                 [--verbose | --quiet]
                  [--report [--json]] [--health [--json]]
                  [--doctor [--json]] [--health-acknowledge [--json]]
                  [--version [--json]] [--help]
@@ -189,6 +197,14 @@ FLAGS:
                     $XDG_CONFIG_HOME/system-janitor/config)
   --dry-run, -n     Log what would be done without modifying anything.
                     Item counts and pre-state are still reported.
+  --verbose, -v     Stream cleanup progress to stdout as well as janitor.log.
+                    Shows targets, allocated sizes, command output, and
+                    observed reclaimed space. Enabled automatically when
+                    stdout is a terminal; use -v in pipes or over SSH.
+                    Color is terminal-only; NO_COLOR disables it.
+  --quiet, -q       Log only, even in a terminal (default for cron/pipes).
+                    If combined with --verbose, the last flag wins.
+                    Neither flag changes read-only probe/JSON output.
   --only <list>     Run ONLY the named section(s); skip all others
                     silently (no JSONL event for skipped sections).
                     <list> is comma-separated, no spaces. Valid names:
@@ -300,7 +316,10 @@ EXAMPLES:
   17 3 * * * "$HOME/.local/bin/agent-toolkit-cron" "$HOME/.local/bin/system-janitor"
 
   # Dry-run preview:
-  system-janitor --dry-run
+  system-janitor --dry-run --verbose
+
+  # Watch a real cleanup, including through a pipe:
+  system-janitor --verbose
 
   # Targeted cleanup (agent idiom): preview Docker or Podman pruning
   system-janitor --only docker_prune --dry-run
@@ -887,6 +906,7 @@ print(json.dumps({
         "idle-status",
         "json-schemas",
         "last-run-sections",
+        "live-output",
         "only",
         "podman-prune",
         "report",
@@ -1613,13 +1633,46 @@ rotate() {
 rotate "$LOG"
 rotate "$JSONL"
 
-exec >>"$LOG" 2>&1
+# ── --verbose / --quiet flags ─────────────────────────────────────────
+LIVE_OUTPUT=0
+COLOR_HEADING="" COLOR_OK="" COLOR_WARN="" COLOR_RESET=""
+if [ "$OUTPUT_MODE" = verbose ] || { [ "$OUTPUT_MODE" = auto ] && [ -t 1 ]; }; then
+  LIVE_OUTPUT=1
+  command -v tee >/dev/null 2>&1 || { echo "[ERROR] live output requires tee" >&2; exit 3; }
+  if [ -t 1 ] && [ -z "${NO_COLOR+x}" ] && [ "${TERM:-}" != dumb ]; then
+    COLOR_HEADING=$'\033[1;36m'
+    COLOR_OK=$'\033[1;32m'
+    COLOR_WARN=$'\033[1;33m'
+    COLOR_RESET=$'\033[0m'
+  fi
+
+  finish_live_output() {
+    local rc=$?
+    trap - EXIT
+    # Close the pipe before waiting, so the final log lines are durable on exit.
+    exec 1>&3 2>&4
+    if ! wait "$LOG_TEE_PID"; then
+      echo "[ERROR] could not finish streaming stdout/janitor.log" >&2
+      [ "$rc" -ne 0 ] || rc=3
+    fi
+    exec 3>&- 4>&-
+    exit "$rc"
+  }
+
+  exec 3>&1 4>&2
+  exec > >(tee --output-error=warn -a "$LOG" >&3 9>&-) 2>&1
+  LOG_TEE_PID=$!
+  trap finish_live_output EXIT
+else
+  exec >>"$LOG" 2>&1
+fi
+# ── end --verbose / --quiet flags ─────────────────────────────────────
 
 # ── Helpers ────────────────────────────────────────────────────────────
 ts()             { date '+%Y-%m-%dT%H:%M:%S%z'; }
 bytes_used_kb()  { df --output=used / | tail -1 | tr -d ' '; }
-human_kb()       { numfmt --from=iec-i --to=iec-i --format='%.1f' "${1}K" 2>/dev/null \
-                    || awk "BEGIN{printf \"%.1fM\",${1}/1024}"; }
+human_kb()       { numfmt --from-unit=1024 --to=iec-i --suffix=B --format='%.1f' "$1" 2>/dev/null \
+                    || awk "BEGIN{printf \"%.1f MiB\",${1}/1024}"; }
 dir_inode()      { stat -c '%i' "$1" 2>/dev/null || echo missing; }
 dir_size()       { du -sb "$1" 2>/dev/null | awk '{print $1}'; }
 
@@ -1700,7 +1753,78 @@ emit_event() {
   esac
 }
 
-section() { echo; echo "── $* ── $(ts)"; }
+section() { printf '\n%s-- %s -- %s%s\n' "$COLOR_HEADING" "$*" "$(ts)" "$COLOR_RESET"; }
+
+# ── --verbose / --quiet flags: read-only target preview ───────────────
+show_cleanup_target() {
+  local path="$1" size label=target
+  [ "$DRY_RUN" = 1 ] && label="would remove"
+  if size=$(du -sk -- "$path" 2>/dev/null); then
+    size="${size%%$'\t'*}"
+    printf '  [%s] %q (%s allocated)\n' "$label" "$path" "$(human_kb "$size")"
+  else
+    printf '  [%s] %q [warn: size unavailable]\n' "$label" "$path"
+  fi
+}
+
+show_cleanup_targets() {
+  [ "$LIVE_OUTPUT" = 1 ] || return 0
+  local dir path days
+  case "$1" in
+    docker_prune)
+      [ "$JANITOR_DOCKER_PRUNE" = yes ] || return 0
+      echo "  [target] unused Docker containers, images, networks, and build cache"
+      [ "$JANITOR_DOCKER_VOLUMES" != yes ] || echo "  [target] unused anonymous Docker volumes (enabled by config)"
+      ;;
+    podman_prune)
+      [ "$JANITOR_PODMAN_PRUNE" = yes ] || return 0
+      echo "  [target] unused Podman images only; containers and volumes kept"
+      ;;
+    go_build_cache)
+      [ "$JANITOR_GO_CLEAN" = yes ] || return 0
+      command -v go >/dev/null 2>&1 || return 0
+      if path=$(go env GOCACHE); then
+        [ ! -d "$path" ] || show_cleanup_target "$path"
+      else
+        echo "  [warn] could not locate Go build cache"
+      fi
+      ;;
+    tmp_gobuild_orphans)
+      [ "$JANITOR_TMP_GOBUILD_ORPHANS" = yes ] || return 0
+      for path in /tmp/go-build* /tmp/gopath; do
+        [ ! -e "$path" ] || show_cleanup_target "$path"
+      done
+      ;;
+    workspace_binobj)
+      while IFS= read -r dir; do
+        [ -d "$dir" ] || continue
+        while IFS= read -r -d '' path; do
+          show_cleanup_target "$path"
+        done < <(find "$dir" -maxdepth 6 -type d \( -name bin -o -name obj \) -prune -print0)
+      done < <(split_paths "$JANITOR_WORKSPACE_DIRS")
+      ;;
+    extra_cleanup)
+      while IFS= read -r path; do
+        [ ! -e "$path" ] || show_cleanup_target "$path"
+      done < <(split_paths_glob "$JANITOR_EXTRA_CLEANUP_DIRS")
+      ;;
+    aged_logs)
+      days="$JANITOR_AGED_LOG_DAYS"
+      case "$days" in ''|*[!0-9]*) days=7 ;; esac
+      while IFS= read -r dir; do
+        [ -d "$dir" ] || continue
+        while IFS= read -r -d '' path; do
+          show_cleanup_target "$path"
+        done < <(find "$dir" -type f -mtime "+${days}" -print0)
+      done < <(split_paths "$JANITOR_AGED_LOG_DIRS")
+      ;;
+    nuget_http_temp)
+      [ "$JANITOR_NUGET_CLEAN" = yes ] || return 0
+      echo "  [target] NuGet HTTP and temporary caches; package cache kept"
+      ;;
+  esac
+}
+# ── end --verbose / --quiet flags ─────────────────────────────────────
 
 # ── Opt-in sections ────────────────────────────────────────────────────
 # Sections that do nothing unless the operator explicitly opts in via a
@@ -1726,7 +1850,7 @@ _optin_section_configured() {
 run_section() {
   local name="$1"; shift
   local item_count_expr="$1"; shift
-  local before after freed status="ok" items=0 note=""
+  local before after freed cumulative rc color status="ok" items=0 note=""
 
   # ── --only flag: skip silently when not in ONLY_SECTIONS ──
   # No log line, no JSONL event — the section is invisible for this run.
@@ -1734,7 +1858,9 @@ run_section() {
   # directly and don't pass through run_section, so they always emit.
   _should_run_section "$name" || return 0
 
-  section "$name"
+  SECTION_INDEX=$((SECTION_INDEX + 1))
+  section "[$SECTION_INDEX/$SECTION_TOTAL] $name"
+  show_cleanup_targets "$name"
   before=$(bytes_used_kb)
 
   if [ -n "$item_count_expr" ] && [ "$item_count_expr" != "0" ]; then
@@ -1753,14 +1879,17 @@ run_section() {
     if "$@" 2>&1; then
       status="ok"
     else
+      rc=$?
       status="warn"
-      note="action exited non-zero (rc=$?)"
+      note="action exited non-zero (rc=$rc)"
+      WARN_SECTIONS=$((WARN_SECTIONS + 1))
     fi
   fi
 
   after=$(bytes_used_kb)
   freed=$((before - after))
   [ "$freed" -lt 0 ] && freed=0
+  [ "$DRY_RUN" != 1 ] || freed=0
 
   # Promote ok→idle for opt-in sections that produced no work on a real
   # run. This is the silent-failure detector required by the north star:
@@ -1777,7 +1906,14 @@ run_section() {
     done
   fi
 
-  echo "[done] section='$name' status=$status items=$items freed=${freed}KB ($(human_kb $freed))"
+  color="$COLOR_OK"
+  [ "$status" != warn ] || color="$COLOR_WARN"
+  printf "%s[done] section='%s' status=%s items=%s freed=%sKB (%s)%s\n" \
+    "$color" "$name" "$status" "$items" "$freed" "$(human_kb "$freed")" "$COLOR_RESET"
+  cumulative=$((START_KB - after))
+  [ "$cumulative" -ge 0 ] || cumulative=0
+  [ "$DRY_RUN" != 1 ] || cumulative=0
+  echo "[space] reclaimed so far: $(human_kb "$cumulative") (observed / filesystem change)"
   emit_event "$name" "$status" "$freed" "$items" "$note"
 }
 
@@ -1787,9 +1923,9 @@ act_docker_prune() {
   command -v docker >/dev/null 2>&1 || { echo "[skip] docker not installed"; return 0; }
   docker info >/dev/null 2>&1 || { echo "[skip] docker daemon down"; return 0; }
   if [ "$JANITOR_DOCKER_VOLUMES" = "yes" ]; then
-    docker system prune -af --volumes | tail -10
+    docker system prune -af --volumes
   else
-    docker system prune -af | tail -10
+    docker system prune -af
   fi
 }
 
@@ -1799,55 +1935,69 @@ act_podman_prune() {
   podman info >/dev/null 2>&1 || { echo "[skip] podman unavailable"; return 0; }
   # Remove images not used by any container, including tagged build images.
   # Do not prune containers or volumes: volumes can hold persistent user data.
-  podman image prune --all --force 2>&1 | tail -10
+  podman image prune --all --force 2>&1
 }
 
 act_go_clean() {
   [ "$JANITOR_GO_CLEAN" = "yes" ] || { echo "[skip] disabled by config"; return 0; }
   command -v go >/dev/null 2>&1 || { echo "[skip] go not installed"; return 0; }
-  go clean -cache -testcache 2>&1 | tail -5
+  go clean -cache -testcache
 }
 
 act_tmp_gobuild() {
   [ "$JANITOR_TMP_GOBUILD_ORPHANS" = "yes" ] || { echo "[skip] disabled by config"; return 0; }
-  local removed=0
+  local removed=0 rc=0 path
   for path in /tmp/go-build* /tmp/gopath; do
     [ -e "$path" ] || continue
     chmod -R u+w "$path" 2>/dev/null || true
-    if rm -rf "$path" 2>/dev/null; then
+    if rm -rf -- "$path"; then
+      echo "  removed $path"
       removed=$((removed+1))
     else
+      rc=$?
       echo "[warn] could not fully remove $path"
     fi
   done
   echo "removed $removed path(s)"
+  return "$rc"
 }
 
 act_workspace_binobj() {
   [ -n "$JANITOR_WORKSPACE_DIRS" ] || { echo "[skip] JANITOR_WORKSPACE_DIRS not set"; return 0; }
-  local total=0 dir count
+  local total=0 rc=0 dir count
   while IFS= read -r dir; do
     [ -d "$dir" ] || { echo "[skip] $dir not found"; continue; }
     count=$(find "$dir" -maxdepth 6 -type d \( -name bin -o -name obj \) -prune 2>/dev/null | wc -l)
-    find "$dir" -maxdepth 6 -type d \( -name bin -o -name obj \) -prune -exec rm -rf {} + 2>/dev/null
-    echo "  $dir: removed $count bin/obj director(ies)"
-    total=$((total+count))
+    if find "$dir" -maxdepth 6 -type d \( -name bin -o -name obj \) -prune -print -exec rm -rf -- {} +; then
+      echo "  $dir: removed $count bin/obj director(ies)"
+      total=$((total+count))
+    else
+      rc=$?
+      echo "  [warn] partial bin/obj removal in $dir"
+    fi
   done < <(split_paths "$JANITOR_WORKSPACE_DIRS")
   echo "total $total bin/obj director(ies) removed"
+  return "$rc"
 }
 
 act_extra_cleanup() {
   [ -n "$JANITOR_EXTRA_CLEANUP_DIRS" ] || { echo "[skip] JANITOR_EXTRA_CLEANUP_DIRS not set"; return 0; }
-  local removed=0 dir
+  local removed=0 rc=0 dir
   while IFS= read -r dir; do
     if [ -e "$dir" ]; then
-      rm -rf "$dir" && { echo "  removed $dir"; removed=$((removed+1)); } \
-                    || echo "  [warn] could not remove $dir"
+      if rm -rf -- "$dir"; then
+        echo "  removed $dir"
+        removed=$((removed+1))
+      else
+        rc=$?
+        echo "  [warn] could not remove $dir"
+      fi
     else
       echo "  [skip] $dir already absent"
     fi
   done < <(split_paths_glob "$JANITOR_EXTRA_CLEANUP_DIRS")
   echo "removed $removed path(s)"
+  return "$rc"
 }
 
 act_aged_logs() {
@@ -1857,26 +2007,31 @@ act_aged_logs() {
   case "$days" in
     ''|*[!0-9]*) echo "[warn] invalid JANITOR_AGED_LOG_DAYS='$days', using 7"; days=7 ;;
   esac
-  local removed=0 dir count
+  local removed=0 rc=0 dir count
   while IFS= read -r dir; do
     [ -d "$dir" ] || { echo "  [skip] $dir not a directory"; continue; }
     count=$(find "$dir" -type f -mtime "+${days}" 2>/dev/null | wc -l)
     if [ "$count" -gt 0 ]; then
-      find "$dir" -type f -mtime "+${days}" -delete 2>/dev/null \
-        && { echo "  $dir: removed $count file(s) older than ${days}d"; removed=$((removed+count)); } \
-        || echo "  [warn] partial removal in $dir"
+      if find "$dir" -type f -mtime "+${days}" -print -delete; then
+        echo "  $dir: removed $count file(s) older than ${days}d"
+        removed=$((removed+count))
+      else
+        rc=$?
+        echo "  [warn] partial removal in $dir"
+      fi
     else
       echo "  $dir: nothing older than ${days}d"
     fi
   done < <(split_paths "$JANITOR_AGED_LOG_DIRS")
   echo "removed $removed file(s)"
+  return "$rc"
 }
 
 act_nuget_caches() {
   [ "$JANITOR_NUGET_CLEAN" = "yes" ] || { echo "[skip] disabled by config"; return 0; }
   command -v dotnet >/dev/null 2>&1 || { echo "[skip] dotnet not installed"; return 0; }
-  dotnet nuget locals http-cache --clear | tail -2
-  dotnet nuget locals temp        --clear | tail -2
+  dotnet nuget locals http-cache --clear || return $?
+  dotnet nuget locals temp --clear
 }
 
 # ── Item-count expressions ─────────────────────────────────────────────
@@ -1908,6 +2063,12 @@ count_aged_logs() {
 }
 
 # ── Run header ─────────────────────────────────────────────────────────
+SECTION_INDEX=0 SECTION_TOTAL=0 WARN_SECTIONS=0
+for _section in "${KNOWN_SECTIONS[@]}"; do
+  if _should_run_section "$_section"; then
+    SECTION_TOTAL=$((SECTION_TOTAL + 1))
+  fi
+done
 START_KB=$(bytes_used_kb)
 
 # Snapshot safety-floor dirs (inode + byte size) before the run.
@@ -1930,6 +2091,7 @@ echo " start  : $(ts)"
 echo " config : ${CONFIG_LOADED:-<none — using defaults>}"
 echo " dryrun : $DRY_RUN"
 echo " safety : ${SAFETY_DIRS_LIST:-<none>}"
+echo " log    : $LOG"
 echo "════════════════════════════════════════════════════════════════"
 df -h / | tail -2
 
@@ -1983,6 +2145,7 @@ fi
 END_KB=$(bytes_used_kb)
 TOTAL_FREED=$((START_KB - END_KB))
 [ "$TOTAL_FREED" -lt 0 ] && TOTAL_FREED=0
+[ "$DRY_RUN" != 1 ] || TOTAL_FREED=0
 EXIT_CODE=0
 
 section "Summary"
@@ -1990,7 +2153,10 @@ df -h / | tail -2
 echo
 echo "run_id           : $RUN_ID"
 echo "total reclaimed  : ${TOTAL_FREED} KB ($(human_kb $TOTAL_FREED))"
+echo "measurement      : observed / filesystem change; other processes may affect it"
+echo "warning sections : $WARN_SECTIONS"
 echo "safety integrity : $INTEGRITY"
+[ "$DRY_RUN" != 1 ] || echo "[dry-run] no files deleted; target sizes are not reclaimed space"
 
 # Atomic last-run.json (now with per-section records assembled from the
 # accumulator). Existing fields are preserved verbatim — only new keys are

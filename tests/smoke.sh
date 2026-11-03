@@ -1894,6 +1894,7 @@ EXPECTED=(
   idle-status
   json-schemas
   last-run-sections
+  live-output
   only
   podman-prune
   report
@@ -1923,6 +1924,153 @@ probe_fail() { fail "capability completeness: probe for '$1' failed — $2"; }
 
 for cap in "${CLAIMED[@]}"; do
   case "$cap" in
+    live-output)
+      W="${CAP_WORK}/p_live"; mkdir -p "$W"
+      # Prove visible, truthful cleanup without touching the host's caches.
+      python3 - "$SCRIPT" "$W" <<'PY' || probe_fail "$cap" "live cleanup output regressed"
+import errno
+import json
+import os
+from pathlib import Path
+import select
+import shlex
+import shutil
+import subprocess
+import sys
+
+script, root = sys.argv[1], Path(sys.argv[2])
+home, tools = root / "home", root / "bin"
+target, safe = root / "cache with spaces", root / "safe"
+for path in (home, tools, target, safe):
+    path.mkdir()
+(target / "artifact").write_bytes(b"x" * 4 * 1024 * 1024)
+(safe / "keep").write_text("keep me\n")
+config = root / "config"
+config.write_text("")
+
+def executable(name, body):
+    path = tools / name
+    path.write_text("#!/usr/bin/env bash\nset -eu\n" + body)
+    path.chmod(0o755)
+
+# Pin df observations so concurrent host writes cannot fake reclamation.
+executable("df", """
+if [ "${1:-}" = --output=used ]; then
+  printf 'Used\\n'
+  if [ -n "${LIVE_DF_COUNTER:-}" ]; then
+    n=0
+    [ ! -f "$LIVE_DF_COUNTER" ] || read -r n < "$LIVE_DF_COUNTER"
+    n=$((n + 1))
+    printf '%s\\n' "$n" > "$LIVE_DF_COUNTER"
+    printf '%s\\n' "$((8192 - n * 1024))"
+  elif [ -d "$LIVE_TARGET" ]; then
+    echo 8192
+  else
+    echo 4096
+  fi
+else
+  exec """ + shlex.quote(shutil.which("df")) + """ "$@"
+fi
+""")
+executable("logger", "exit 0\n")
+env = dict(os.environ, HOME=str(home), PATH=f"{tools}:{os.environ['PATH']}",
+           XDG_CONFIG_HOME=str(home / ".config"), XDG_STATE_HOME=str(home / ".state"),
+           JANITOR_WORKSPACE_DIRS="", JANITOR_AGED_LOG_DIRS="", JANITOR_DRY_RUN="0",
+           JANITOR_EXTRA_CLEANUP_DIRS=str(target), JANITOR_SAFETY_FLOOR_DIRS=str(safe),
+           LIVE_TARGET=str(target))
+for knob in ("DOCKER_PRUNE", "PODMAN_PRUNE", "GO_CLEAN", "TMP_GOBUILD_ORPHANS", "NUGET_CLEAN"):
+    env[f"JANITOR_{knob}"] = "no"
+command = [script, "--config", str(config), "--only", "extra_cleanup"]
+
+def run(*flags, state, extra=None):
+    state_dir = root / state
+    run_env = dict(env, JANITOR_LOG_DIR=str(state_dir), **(extra or {}))
+    result = subprocess.run(command + list(flags), env=run_env, text=True,
+                            capture_output=True, timeout=30)
+    assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
+    return result.stdout, state_dir
+
+output, _ = run("--dry-run", state="quiet")
+assert output == "", output
+output, state = run("-v", "--dry-run", state="preview",
+                    extra={"LIVE_DF_COUNTER": str(root / "df-counter")})
+assert "[1/1] extra_cleanup" in output and "[would remove]" in output, output
+assert "cache\\ with\\ spaces" in output and "MiB allocated" in output, output
+assert "\x1b" not in output and "no files deleted" in output, output
+summary = json.loads((state / "last-run.json").read_text())
+assert summary["freed_kb"] == 0 and summary["sections"][0]["freed_bytes"] == 0, summary
+assert target.is_dir() and (safe / "keep").read_text() == "keep me\n"
+
+output, state = run("--verbose", state="actual")
+assert not target.exists() and (safe / "keep").is_file()
+assert "removed " in output and "reclaimed so far:" in output, output
+assert "freed=4096KB" in output and "warning sections : 0" in output, output
+assert output == (state / "janitor.log").read_text(), "stream/log missing final lines"
+summary = json.loads((state / "last-run.json").read_text())
+assert summary["freed_kb"] == 4096 and summary["safety_integrity"] == "ok", summary
+assert summary["sections"][0]["freed_bytes"] == 4096 * 1024, summary
+
+output, _ = run("-v", "-q", "--dry-run", state="override")
+assert output == "", output
+for flag in ("--verbose", "--quiet"):
+    output, state = run(flag, "--version", "--json", state="probe")
+    assert "live-output" in json.loads(output)["capabilities"]
+    assert "\x1b" not in output and not state.exists()
+
+# Permission/tool failures must not become success-shaped audit records.
+target.mkdir()
+executable("rm", """
+for arg do
+  if [ "$arg" = "$LIVE_TARGET" ]; then
+    echo 'fixture removal denied' >&2
+    exit 23
+  fi
+done
+exec """ + shlex.quote(shutil.which("rm")) + """ "$@"
+""")
+output, state = run("-v", state="failure")
+assert target.exists() and "fixture removal denied" in output, output
+assert "status=warn" in output and "warning sections : 1" in output, output
+events = [json.loads(line) for line in (state / "janitor.jsonl").read_text().splitlines()]
+event = next(e for e in events if e["section"] == "extra_cleanup")
+assert event["status"] == "warn" and "rc=23" in event["note"], event
+
+def terminal(*flags, no_color=False):
+    master, slave = os.openpty()
+    tty_env = dict(env, JANITOR_LOG_DIR=str(root / "tty"), TERM="xterm")
+    tty_env.pop("NO_COLOR", None)
+    if no_color:
+        tty_env["NO_COLOR"] = ""
+    process = subprocess.Popen(command + ["--dry-run", *flags], env=tty_env,
+                               stdout=slave, stderr=slave)
+    os.close(slave)
+    chunks = []
+    try:
+        while True:
+            assert select.select([master], [], [], 30)[0], "terminal output stalled"
+            try:
+                data = os.read(master, 65536)
+            except OSError as exc:
+                if exc.errno != errno.EIO:
+                    raise
+                break
+            if not data:
+                break
+            chunks.append(data)
+        assert process.wait(timeout=10) == 0
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        os.close(master)
+    return b"".join(chunks).decode()
+
+assert "\x1b[" in terminal(), "TTY did not enable colored live output"
+output = terminal(no_color=True)
+assert "[1/1] extra_cleanup" in output and "\x1b" not in output, output
+assert terminal("--quiet") == "", "--quiet did not suppress terminal output"
+PY
+      ;;
     podman-prune)
       W="${CAP_WORK}/p_podman"; mkdir -p "$W/bin" "$W/state"
       PODMAN_CALLS="${W}/calls"
@@ -2016,7 +2164,17 @@ assert seen == {'docker_prune'}, f'expected only docker_prune, got {seen}'
     idle-status)
       # Real (non-dry) run of opt-in section workspace_binobj pointed at
       # an empty workspace → produces zero items → status=idle event.
-      W="${CAP_WORK}/p_idle"; mkdir -p "$W/ws_empty" "$W/state"
+      W="${CAP_WORK}/p_idle"; mkdir -p "$W/ws_empty" "$W/state" "$W/bin"
+      # Unrelated host cleanup must not look like this empty section did work.
+      cat > "$W/bin/df" <<'DF'
+#!/usr/bin/env bash
+if [ "${1:-}" = --output=used ]; then
+  printf 'Used\n1048576\n'
+else
+  exec "$IDLE_REAL_DF" "$@"
+fi
+DF
+      chmod +x "$W/bin/df"
       CFG="${W}/cfg"
       cat > "$CFG" <<EOF
 JANITOR_DOCKER_PRUNE=no
@@ -2025,7 +2183,11 @@ JANITOR_TMP_GOBUILD_ORPHANS=no
 JANITOR_NUGET_CLEAN=no
 JANITOR_WORKSPACE_DIRS="${W}/ws_empty"
 EOF
-      set +e; JANITOR_LOG_DIR="${W}/state" "$SCRIPT" --config "$CFG" --only workspace_binobj > "${W}/out" 2>&1; rc=$?; set -e
+      set +e
+      IDLE_REAL_DF="$(command -v df)" PATH="${W}/bin:${PATH}" JANITOR_LOG_DIR="${W}/state" \
+        "$SCRIPT" --config "$CFG" --only workspace_binobj > "${W}/out" 2>&1
+      rc=$?
+      set -e
       [ "$rc" -eq 0 ] || { cat "${W}/out"; probe_fail "$cap" "real run exit $rc"; }
       grep -q '"status":"idle"' "${W}/state/janitor.jsonl" \
         || probe_fail "$cap" "no status=idle event in janitor.jsonl"

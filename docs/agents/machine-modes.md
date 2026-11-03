@@ -133,7 +133,7 @@ Capability discovery surface. Read-only; requires no state (not even `HOME`).
   "capabilities": [
     "aged-logs", "doctor", "doctor-json", "extra-cleanup-globs",
     "health", "health-acknowledge", "health-json", "idle-status",
-    "json-schemas", "last-run-sections", "only", "podman-prune",
+    "json-schemas", "last-run-sections", "live-output", "only", "podman-prune",
     "report", "report-bytes", "report-json", "schema-aliases",
     "toolkit-manifest", "version", "version-json"
   ],
@@ -182,6 +182,7 @@ Mapping (capability string → feature):
 | `report-bytes` | `_bytes` fields present in report output |
 | `idle-status` | `idle` status enum value emitted for stale opt-in sections |
 | `last-run-sections` | `last-run.json.sections[]` present |
+| `live-output` | Human-only terminal progress; `--verbose` / `--quiet` override auto-detection without changing JSON probes |
 | `json-schemas` | `schemas/*.schema.json` ship with the repo |
 | `schema-aliases` | `SECTION_ALIASES` remap applied before obsolete filter |
 | `podman-prune` | `podman image prune --all --force`, limited to images not used by any container |
