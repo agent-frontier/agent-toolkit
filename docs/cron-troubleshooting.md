@@ -153,14 +153,29 @@ triggers every 5 minutes (`OnCalendar=*:0/5`, `Persistent=true`):
 1. **Daily catch-up:** the latest `03:17` slot (after a `03:30` grace window)
    has no healthy real `last-run.json` or its `agent-toolkit-cron` record failed.
 2. **Disk pressure:** root filesystem usage is `>= JANITOR_PRESSURE_THRESHOLD_PCT`
-   (default `75%`), gated by a 4-hour post-run cooldown
-   (`JANITOR_PRESSURE_COOLDOWN_SEC=14400`) so persistent non-janitor disk usage
-   cannot thrash warm caches or inflate opt-in `idle_streaks`.
+   (default `75%`), with a 15-minute post-cleanup cooldown
+   (`JANITOR_PRESSURE_COOLDOWN_SEC=900`).
 
-When neither trigger fires, the unit exits `0` without invoking `system-janitor`.
-When triggered, it sweeps stale (`>=1h` deepest-tree `mtime`, unreferenced by
-`/proc` `cwd`/`exe`/`fd`/`cmdline`) user-owned `/tmp` orphans and invokes
-`agent-toolkit-cron system-janitor`:
+The fast path enforces **soft idle-only Go cache budgets**, including below
+the pressure threshold: 16 GiB per shared cache, 2 GiB per session cache,
+32 GiB combined. A cache needs five minutes without recent writes and no
+Go process or open reference using it. Active caches can exceed the budget;
+they are reported as deferred, never removed underneath a build.
+
+Generated workspace directories must be ignored, at least an hour old,
+and backed by a matching archive snapshot or clean, pushed worktree.
+Immediately before removal the helper independently fetches the exact commit
+and rechecks source, staging, processes and worker leases. Unsaved source,
+unknown remote state, `.git`/`.jj` repositories, captured media and volumes
+are preserved. No source is automatically published.
+Generated trees containing credential configurations, databases, keys,
+recordings or image files are conservatively retained, including dependency
+trees that happen to bundle such files.
+
+Pressure runs use this guarded path, **not repeated full Janitor sweeps**.
+Only missed daily slots invoke `agent-toolkit-cron system-janitor`.
+Daily catch-up also sweeps stale, unreferenced user-owned `/tmp` orphans;
+source checkouts and mounted filesystems are excluded.
 
 ```bash
 ln -sf "$PWD/scripts/system-janitor-catchup.sh" "$HOME/.local/bin/system-janitor-catchup"
@@ -170,3 +185,49 @@ systemctl --user daemon-reload
 systemctl --user enable --now system-janitor-catchup.timer
 system-janitor-catchup --status --json
 ```
+
+Configure roots and budgets in
+`~/.config/system-janitor/maintenance.json`; start from
+[`examples/maintenance.example.json`](../examples/maintenance.example.json).
+`archive_roots` bounds receipt-backed projects, while `worktree_roots` lists
+directories containing completed worker checkouts. New worktrees must be
+clean and recoverable from their existing `origin` before artifacts qualify.
+Dirty receipt-backed projects qualify only while source and staged trees
+still match their saved snapshots.
+
+`--status --json` is read-only and includes current cache budgets/activity
+plus the previous workspace scan. `--dry-run --json` additionally plans
+workspace artifacts without deleting them. Results go to
+`~/.local/state/janitor/maintenance-last.json` (atomic) and
+`maintenance.jsonl` (compact append-only events, rotated at 5 MiB with eight
+backups), with actions, protected paths, errors and
+observed reclaimed bytes. Missing tools and failed cleanup are visible errors,
+not successful empty sweeps. Existing daily cron schedules stay unchanged.
+
+### Keeping continuous builds from defeating cleanup
+
+An always-busy swarm can keep a cache above its soft budget indefinitely.
+The optional user Go launcher, `scripts/go-with-disk-guard.py`, queues **new**
+build/test/run/install work when root usage reaches `build_max_used_pct`
+(default 85%) or free space falls below `build_min_free_gib` (20 GiB).
+Existing and genuinely nested builds finish normally; a stale inherited
+environment marker does not bypass admission. `go env`, `version`, `help`,
+`clean`, and read-only module metadata commands never wait. No process is killed.
+
+The launcher and cleaner use per-cache shared/exclusive locks, preventing
+new participating builds from starting during cache removal. At the admission
+ceiling, idle caches of at least 128 MiB can be reclaimed even below their
+individual budgets. This leaves an idle window instead of repeatedly deferring.
+
+Installing the launcher is opt-in: first preserve the original user Go
+executable beside it as `go.agent-toolkit-real`, verify identical version
+and `GOROOT`, and record its absolute path in
+`~/.config/system-janitor/go-real-path`. Then point the user Go launcher at
+the executable guard script. Never overwrite the original without a verified
+backup. Restoring that backup removes the admission guard.
+
+Queued builds expose only PID, working directory, command name and reason
+under `~/.local/state/janitor/waiting-go-builds/`; command arguments and
+credentials are not recorded. The catch-up status includes these records.
+If protected data still leaves insufficient space, new work remains queued
+rather than evicting active builds or unbacked source.

@@ -256,6 +256,19 @@ with tempfile.TemporaryDirectory(prefix="toolkit-cron-") as temp:
     (nested_sub / "fresh.o").write_text("fresh")
     os.utime(nested_dir, (old_ts, old_ts))
     os.utime(nested_sub, (old_ts, old_ts))
+    # Old source checkouts are not disposable scratch directories.
+    source_dir = tmp_sandbox / "stale-source"
+    (source_dir / ".git").mkdir(parents=True)
+    (source_dir / "source.txt").write_text("unbacked work")
+    for path in (source_dir / ".git", source_dir / "source.txt", source_dir):
+        os.utime(path, (old_ts, old_ts))
+    opaque = tmp_sandbox / "opaque-tree"
+    hidden = opaque / "private"
+    (hidden / ".git").mkdir(parents=True)
+    (hidden / "source.txt").write_text("unbacked and unreadable")
+    for path in (hidden / ".git", hidden / "source.txt", hidden, opaque):
+        os.utime(path, (old_ts, old_ts))
+    hidden.chmod(0)
     catchup_env = dict(
         env,
         JANITOR_CRON_WRAPPER=str(launcher),
@@ -265,10 +278,15 @@ with tempfile.TemporaryDirectory(prefix="toolkit-cron-") as temp:
         JANITOR_TMP_ROOT=str(tmp_sandbox),
     )
     # 1. Missing last-run.json triggers missed_daily_slot, sweeps stale_dir, preserves nested_dir.
-    res = subprocess.run([str(catchup)], env=catchup_env, capture_output=True, text=True, timeout=15)
+    try:
+        res = subprocess.run([str(catchup)], env=catchup_env, capture_output=True, text=True, timeout=15)
+    finally:
+        hidden.chmod(0o700)
     assert res.returncode == 0, res.stderr
     assert "[trigger] reason=missed_daily_slot" in res.stdout, res.stdout
     assert not stale_dir.exists() and nested_dir.exists()
+    assert (source_dir / "source.txt").exists()
+    assert (hidden / "source.txt").exists()
     # 2. Fresh healthy last-run.json with high pressure stays in pressure_cooldown.
     now_iso = dt.datetime.now(dt.timezone.utc).isoformat()
     last_run_file.write_text(json.dumps({"ended_at": now_iso, "dry_run": 0, "safety_integrity": "ok"}))
@@ -279,6 +297,18 @@ with tempfile.TemporaryDirectory(prefix="toolkit-cron-") as temp:
     res_cd = subprocess.run([str(catchup), "--status", "--json"], env=cd_env, capture_output=True, text=True, timeout=15)
     cd_data = json.loads(res_cd.stdout)
     assert cd_data["status"] == "cooldown" and cd_data["reason"] == "pressure_cooldown" and not cd_data["would_trigger"], cd_data
+    # Frequent pressure attempts must not rerun the full native cleanup.
+    quick_env = dict(catchup_env, JANITOR_PRESSURE_THRESHOLD_PCT="1")
+    quick = subprocess.run([str(catchup), "--status", "--json"], env=quick_env,
+                           capture_output=True, text=True, timeout=15)
+    quick_data = json.loads(quick.stdout)
+    assert quick_data["cooldown_sec"] == 900 and quick_data["maintenance"]["version"] == 1, quick_data
+    evidence = (state / "system-janitor.json").read_bytes()
+    quick_env["JANITOR_PRESSURE_COOLDOWN_SEC"] = "0"
+    pressure = subprocess.run([str(catchup)], env=quick_env,
+                              capture_output=True, text=True, timeout=15)
+    assert pressure.returncode == 0 and "[pressure]" in pressure.stdout, pressure
+    assert (state / "system-janitor.json").read_bytes() == evidence, "pressure ran full Janitor"
     print("ok: system-janitor-catchup daily catch-up, cooldown guard, and deepest-mtime /tmp sweep")
 
 print("all cron smoke checks passed")

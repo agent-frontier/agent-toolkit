@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Persistent-timer + disk-pressure companion for system-janitor:
 # - Checks every 5 minutes via systemd user timer (Persistent=true).
-# - Triggers cleanup via agent-toolkit-cron ONLY when:
+# - Uses idle-only budgeted maintenance for pressure; full Janitor ONLY when:
 #   (1) root filesystem usage >= JANITOR_PRESSURE_THRESHOLD_PCT (default: 75%), OR
 #   (2) the latest daily 03:17 cron slot (after 03:30 grace) was missed or failed.
 # - Staying idle-silent when healthy (<75% and daily slot satisfied) preserves warm
@@ -31,10 +31,12 @@ Usage: system-janitor-catchup [--status] [--dry-run|-n] [--json]
 
 Evaluates two triggers on a 5-minute systemd user timer:
   1. Disk pressure: root filesystem Use% >= JANITOR_PRESSURE_THRESHOLD_PCT (default 75),
-     gated by JANITOR_PRESSURE_COOLDOWN_SEC (default 14400s / 4h) after a real run.
+     gated by JANITOR_PRESSURE_COOLDOWN_SEC (default 900s / 15m) after cleanup.
   2. Daily catch-up: latest daily 03:17 slot (after 03:30 grace) missed or failed.
-When triggered, sweeps stale (>=JANITOR_ORPHAN_MIN_AGE_SEC deepest-mtime) unreferenced
-user /tmp orphans and runs agent-toolkit-cron system-janitor.
+Checks cache budgets even below the pressure threshold. Busy builds, unsaved
+source and repository roots are protected. Pressure cleanup uses maintenance.json
+and never runs a blind full sweep. Only daily catch-up invokes the full Janitor.
+--status is read-only; --dry-run also previews archived generated-artifact targets.
 EOF
       exit 0
       ;;
@@ -61,9 +63,15 @@ readonly JANITOR="${JANITOR_BIN:-${HOME}/.local/bin/system-janitor}"
 readonly LAST_RUN="${JANITOR_LAST_RUN:-${STATE_ROOT}/janitor/last-run.json}"
 readonly CRON_STATE="${JANITOR_CRON_STATE:-${STATE_ROOT}/agent-toolkit/cron/system-janitor.json}"
 readonly THRESHOLD_PCT="${JANITOR_PRESSURE_THRESHOLD_PCT:-75}"
-readonly COOLDOWN_SEC="${JANITOR_PRESSURE_COOLDOWN_SEC:-14400}"
+readonly COOLDOWN_SEC="${JANITOR_PRESSURE_COOLDOWN_SEC:-900}"
 readonly TMP_ROOT="${JANITOR_TMP_ROOT:-/tmp}"
 readonly ORPHAN_MIN_AGE_SEC="${JANITOR_ORPHAN_MIN_AGE_SEC:-3600}"
+readonly MAINTENANCE_POLICY="${JANITOR_MAINTENANCE_POLICY:-${XDG_CONFIG_HOME:-${HOME}/.config}/system-janitor/maintenance.json}"
+MAINTENANCE="${JANITOR_MAINTENANCE_BIN:-$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/janitor-maintenance.py}"
+if [ ! -f "$MAINTENANCE" ]; then
+  echo "[error] maintenance component missing: $MAINTENANCE" >&2
+  exit 3
+fi
 
 if [ ! -x "$JANITOR" ]; then
   echo "[error] system-janitor not executable: $JANITOR" >&2
@@ -108,7 +116,7 @@ if [ ! -d "$TMP_ROOT" ]; then
   exit 3
 fi
 
-eval_out="$(python3 - "$LAST_RUN" "$CRON_STATE" "$THRESHOLD_PCT" "$COOLDOWN_SEC" "$TMP_ROOT" "$ORPHAN_MIN_AGE_SEC" "$MODE" "$JSON_OUT" <<'PY'
+eval_out="$(python3 - "$LAST_RUN" "$CRON_STATE" "$THRESHOLD_PCT" "$COOLDOWN_SEC" "$TMP_ROOT" "$ORPHAN_MIN_AGE_SEC" "$MODE" "$JSON_OUT" "${LAST_RUN%/*}/maintenance-last.json" <<'PY'
 import datetime
 import fcntl
 import glob
@@ -128,6 +136,7 @@ tmp_root = os.path.abspath(sys.argv[5])
 min_age_sec = int(sys.argv[6])
 mode = sys.argv[7]
 json_out = int(sys.argv[8])
+maintenance_state_path = sys.argv[9]
 
 
 def is_lock_held(path: str) -> bool:
@@ -185,7 +194,12 @@ def newest_mtime_in_tree(path: str, initial_mtime: float, cutoff: float) -> floa
     newest = initial_mtime
     if newest >= cutoff:
         return newest
-    for root, dirs, files in os.walk(path, topdown=True, followlinks=False):
+    unreadable = []
+    for root, dirs, files in os.walk(path, topdown=True, followlinks=False, onerror=unreadable.append):
+        if os.path.ismount(root):
+            return float("inf")
+        if ".git" in dirs or ".git" in files or ".jj" in dirs or ".jj" in files:
+            return float("inf")  # Source checkouts are not disposable /tmp orphans.
         for name in dirs + files:
             child = os.path.join(root, name)
             try:
@@ -193,10 +207,10 @@ def newest_mtime_in_tree(path: str, initial_mtime: float, cutoff: float) -> floa
                 if st.st_mtime > newest:
                     newest = st.st_mtime
                     if newest >= cutoff:
-                        return newest
+                        return float("inf") if unreadable else newest
             except OSError:
-                continue
-    return newest
+                return float("inf")
+    return float("inf") if unreadable else newest
 
 
 def scan_candidates(state_dir: str, base_tmp: str, min_age: int) -> tuple[list[str], list[tuple[str, bool]]]:
@@ -370,6 +384,18 @@ if last_run_healthy and cron_ok and completed_dt is not None and cooldown_sec > 
     elapsed = (now - completed_dt).total_seconds()
     if 0 <= elapsed < cooldown_sec:
         cooldown_remaining_sec = int(math.ceil(cooldown_sec - elapsed))
+try:
+    with open(maintenance_state_path, encoding="utf-8") as fh:
+        maintenance_state = json.load(fh)
+except FileNotFoundError:
+    maintenance_state = {}
+if maintenance_state.get("last_cleanup_at") and cooldown_sec > 0:
+    maintenance_end = datetime.datetime.fromisoformat(maintenance_state["last_cleanup_at"])
+    maintenance_elapsed = (now - maintenance_end).total_seconds()
+    if 0 <= maintenance_elapsed < cooldown_sec:
+        cooldown_remaining_sec = max(
+            cooldown_remaining_sec, int(math.ceil(cooldown_sec - maintenance_elapsed))
+        )
 
 if run_in_progress:
     status = "healthy"
@@ -399,7 +425,7 @@ if mode in ("status", "dry_run") or json_out == 1 or would_trigger:
 
 reaped_count = 0
 failed_count = 0
-if mode == "run" and would_trigger:
+if mode == "run" and would_trigger and reason == "missed_daily_slot":
     reaped_count, failed_count = execute_orphan_sweep(dead_sections, stale_tmp)
 
 out = {
@@ -436,15 +462,55 @@ fi
 
 {
   IFS= read -r eval_json
-  IFS=$'\t' read -r would_trigger reason used_pct cooldown_rem reaped_cnt failed_cnt status_str daily_ok stale_cnt dead_cnt
+  IFS=$'\t' read -r would_trigger reason used_pct cooldown_rem reaped_cnt failed_cnt _ _ _ _
 } <<< "$eval_out"
+
+maintenance_json="$(python3 "$MAINTENANCE" --mode "$MODE" --policy "$MAINTENANCE_POLICY" \
+  --state-dir "${LAST_RUN%/*}" --cron-lock "${CRON_STATE%/*}/system-janitor.lock" \
+  --cooldown "$COOLDOWN_SEC" --cooldown-remaining "$cooldown_rem")"
+maintenance_rc=$?
+eval_json="$(printf '%s\n%s\n' "$eval_json" "$maintenance_json" | python3 -c '
+import json, sys
+doc = json.loads(sys.stdin.readline())
+maintenance = json.loads(sys.stdin.readline())
+doc["maintenance"] = maintenance
+doc["cooldown_remaining_sec"] = max(doc["cooldown_remaining_sec"], maintenance.get("cooldown_remaining_sec", 0))
+if maintenance.get("status") == "error":
+    doc.update(status="error", reason="maintenance_error", would_trigger=False)
+elif maintenance.get("status") == "ready" and doc["reason"] == "none":
+    doc.update(status="needs_run", reason="cache_budget", would_trigger=True)
+print(json.dumps(doc))
+')" || exit 3
 
 if [ "$MODE" = "status" ] || [ "$MODE" = "dry_run" ]; then
   if [ "$JSON_OUT" -eq 1 ]; then
     printf '%s\n' "$eval_json"
   else
-    echo "[status] status=${status_str} would_trigger=${would_trigger} reason=${reason} used_pct=${used_pct}% (threshold=${THRESHOLD_PCT}%, cooldown_rem=${cooldown_rem}s) daily_slot_satisfied=${daily_ok} stale_tmp=${stale_cnt} dead_sections=${dead_cnt}"
+    printf '%s\n' "$eval_json" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+print("[status] status=%s would_trigger=%s reason=%s used_pct=%s%% cooldown_rem=%ss maintenance=%s" % (
+    d["status"], d["would_trigger"], d["reason"], d["used_pct"],
+    d["cooldown_remaining_sec"], d["maintenance"]["status"]))
+'
   fi
+  exit "$maintenance_rc"
+fi
+
+if [ "$maintenance_rc" -ne 0 ]; then
+  printf '[error] budgeted maintenance failed: %s\n' "$maintenance_json" >&2
+  exit "$maintenance_rc"
+fi
+printf '%s\n' "$maintenance_json" | python3 -c '
+import json, sys
+doc = json.load(sys.stdin)
+print("[maintenance] status=%s removed=%.2fGiB actions=%d" % (
+    doc["status"], doc["removed_bytes"] / 1073741824, len(doc["actions"])))
+'
+
+if [ "$reason" = "disk_pressure" ]; then
+  echo "[pressure] used=${used_pct}% threshold=${THRESHOLD_PCT}%; protected budgeted maintenance only"
+  echo "[orphan-sweep] reaped=${reaped_cnt} failed=${failed_cnt} root=${TMP_ROOT}"
   exit 0
 fi
 
@@ -454,7 +520,7 @@ if [ "$would_trigger" != "1" ]; then
   elif [ "$reason" = "pressure_cooldown" ]; then
     echo "[warn] disk pressure (${used_pct}% >= ${THRESHOLD_PCT}%) persists within ${COOLDOWN_SEC}s cooldown (${cooldown_rem}s remaining); skipping to prevent cache/idle-streak thrash"
   else
-    echo "[skip] no cleanup needed (reason=${reason}, used=${used_pct}%, threshold=${THRESHOLD_PCT}%)"
+    echo "[skip] no full daily catch-up needed (reason=${reason}, used=${used_pct}%, threshold=${THRESHOLD_PCT}%)"
   fi
   exit 0
 fi

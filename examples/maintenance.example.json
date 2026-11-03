@@ -1,0 +1,16 @@
+{
+  "go_cache_dirs": ["$HOME/.cache/go-build", "$HOME/.cache/smith-gocache"],
+  "session_roots": ["$HOME/.copilot/session-state"],
+  "shared_cache_budget_gib": 16,
+  "session_cache_budget_gib": 2,
+  "total_cache_budget_gib": 32,
+  "cache_idle_seconds": 300,
+  "artifact_idle_seconds": 3600,
+  "archive_roots": ["$HOME/projects"],
+  "worktree_roots": [],
+  "archive_catalogs": ["$HOME/.local/state/janitor/project-archives-*.json"],
+  "max_actions": 8,
+  "max_run_seconds": 90,
+  "build_min_free_gib": 20,
+  "build_max_used_pct": 85
+}
