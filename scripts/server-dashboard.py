@@ -27,10 +27,10 @@ import time
 from urllib.parse import urlsplit
 
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 LIMIT = 2 * 1024 * 1024
 ASSETS = Path(__file__).resolve().parent.parent / "dashboard"
-CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "lan-https", "loopback-only",
+CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "container-inventory-all", "interactive-view", "lan-https", "loopback-only",
                        "read-only", "snapshot-json", "systemd-services", "trusted-lan-readonly"])
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
@@ -231,7 +231,7 @@ def container_inventory(path):
         connection.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         connection.sock.settimeout(2)
         connection.sock.connect(str(path))
-        connection.request("GET", "/containers/json")
+        connection.request("GET", "/containers/json?all=1")
         response = connection.getresponse()
         raw = response.read(LIMIT + 1)
         if response.status != 200 or len(raw) > LIMIT:
@@ -248,7 +248,8 @@ def container_inventory(path):
             "items": [
                 {"ID": str(item.get("Id", ""))[:12],
                  "Names": ", ".join(str(name).lstrip("/") for name in item.get("Names", [])),
-                 "Image": str(item.get("Image", "")), "Status": str(item.get("Status", ""))}
+                 "Image": str(item.get("Image", "")), "Status": str(item.get("Status", "")),
+                 "State": str(item.get("State", ""))}
                 for item in rows[:100]
             ],
         }

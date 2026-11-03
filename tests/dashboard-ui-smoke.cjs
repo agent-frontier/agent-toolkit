@@ -7,23 +7,31 @@ const vm = require("node:vm");
 function application() {
   const nodes = new Map();
   const requests = [];
+  const pending = [], timers = new Map();
+  let nextTimer = 0;
   function element() {
     return {
-      value: "", children: [], textContent: "",
+      value: "", children: [], textContent: "", events: {}, attributes: {}, open: false,
       append(...children) { this.children.push(...children); },
       replaceChildren(...children) { this.children = children; },
-      addEventListener() {},
+      addEventListener(name, callback) { this.events[name] = callback; },
+      setAttribute(name, value) { this.attributes[name] = value; },
+      showModal() { this.open = true; },
+      close() { this.open = false; },
     };
   }
   const document = {
     getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); },
     createElement: element,
+    createElementNS: element,
   };
   const context = vm.createContext({
     document, URLSearchParams, location: { hash: "" },
-    AbortSignal, clearTimeout() {},
-    fetch(url) { requests.push(url); return new Promise(() => {}); },
-    sessionStorage: { getItem() { return null; } },
+    AbortSignal,
+    clearTimeout(id) { timers.delete(id); },
+    setTimeout(callback) { const id = ++nextTimer; timers.set(id, callback); return id; },
+    fetch(url) { requests.push(url); return new Promise(resolve => pending.push(resolve)); },
+    sessionStorage: { getItem() { return null; }, setItem() {}, removeItem() {} },
     fixture: {
       system_services: { items: [{ unit: "active-system.service", scope: "system", active: "active", sub: "running", description: "system worker" }] },
       user_services: { items: [{ unit: "failed-user.service", scope: "user", active: "failed", sub: "failed", description: "user failure" }] },
@@ -31,7 +39,7 @@ function application() {
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/app.js"), "utf8"), context);
   document.getElementById("service-state").value = "live";
-  return { nodes, context, requests };
+  return { nodes, context, requests, pending, timers };
 }
 
 test("opening the plain URL requests data without a token or a terminal command", () => {
@@ -55,4 +63,87 @@ test("mixed-scope service filtering retains explicit failed and empty states", (
   nodes.get("service-search").value = "no matching service";
   vm.runInContext("serviceRows();", context);
   assert.equal(nodes.get("services").children[0].children[0].textContent, "No matching observed services");
+});
+
+test("service name sorting is explicit while the default remains failed-first", () => {
+  const { nodes, context } = application();
+  nodes.get("service-sort").value = "name";
+  vm.runInContext("snapshot=fixture; serviceRows();", context);
+  assert.equal(nodes.get("services").children[0].children[0].textContent, "active-system.service");
+});
+
+test("displayed process sample can be searched and sorted by RAM", () => {
+  const { nodes, context } = application();
+  context.processes = {items: [
+    {name: "cpu-worker", pid: 11, cpu_percent: 80, memory_bytes: 10},
+    {name: "memory-worker", pid: 22, cpu_percent: 2, memory_bytes: 200},
+  ]};
+  nodes.get("process-sort").value = "memory";
+  vm.runInContext("snapshot={processes}; processRows();", context);
+  assert.equal(nodes.get("processes").children[0].children[0].textContent, "memory-worker");
+  nodes.get("process-search").value = "11";
+  vm.runInContext("processRows();", context);
+  assert.equal(nodes.get("processes").children.length, 1);
+  assert.equal(nodes.get("processes").children[0].children[0].textContent, "cpu-worker");
+});
+
+test("Podman created containers remain visible and engine/state filters work", () => {
+  const { nodes, context } = application();
+  context.inventories = {
+    docker: {status: "available", items: [{Names: "docker-running", Image: "image", State: "running", Status: "Up"}]},
+    podman: {status: "available", items: [{Names: "podman-created", Image: "image", State: "created", Status: "Created"}]},
+  };
+  vm.runInContext("snapshot=inventories; containerRows();", context);
+  assert.deepEqual(nodes.get("containers").children.filter(node => node.className === "workload").map(node => node.children[0].textContent),
+    ["docker-running", "podman-created"]);
+  nodes.get("container-engine").value = "podman";
+  nodes.get("container-state").value = "stopped";
+  vm.runInContext("containerRows();", context);
+  assert.equal(nodes.get("containers").children.find(node => node.className === "workload").children[0].textContent, "podman-created");
+  nodes.get("container-state").value = "running";
+  vm.runInContext("containerRows();", context);
+  assert.equal(nodes.get("containers").children.filter(node => node.className === "workload").length, 0);
+});
+
+test("chart ranges use the latest observed timestamp even while paused", () => {
+  const { nodes, context } = application();
+  context.points = [{ts: "2020-01-01T00:00:00Z"}, {ts: "2020-01-01T00:09:00Z"}, {ts: "2020-01-01T00:10:00Z"}];
+  nodes.get("history-window").value = "5";
+  assert.equal(vm.runInContext("snapshot={history:points}; historyRows().length", context), 2);
+  nodes.get("history-window").value = "0";
+  assert.equal(vm.runInContext("historyRows().length", context), 3);
+});
+
+test("tap details use snapshot text and a dismissible dialog, not commands", () => {
+  const { nodes, context } = application();
+  vm.runInContext("snapshot={generated_at:'2020-01-01T00:00:00Z'}; showDetails('Process',{name:'<script>not executable</script>',pid:22,cpu_percent:null,memory_bytes:100});", context);
+  assert.equal(nodes.get("detail-dialog").open, true);
+  assert.equal(nodes.get("detail-fields").children[1].textContent, "<script>not executable</script>");
+  nodes.get("detail-close").events.click();
+  assert.equal(nodes.get("detail-dialog").open, false);
+});
+
+test("pause freezes an in-flight automatic update; manual refresh and resume do not overlap requests", async () => {
+  const { nodes, context, requests, pending, timers } = application();
+  context.published = [];
+  vm.runInContext("render=value=>{snapshot=value;published.push(value);};", context);
+  const response = () => ({status: 200, ok: true, json: async () => ({generated_at: new Date().toISOString(), status: "healthy"})});
+  nodes.get("live-toggle").events.click();
+  pending.shift()(response());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.published.length, 0);
+  assert.equal(timers.size, 0);
+  nodes.get("refresh-now").events.click();
+  nodes.get("refresh-now").events.click();
+  assert.equal(requests.length, 2);
+  pending.shift()(response());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(context.published.length, 1);
+  assert.equal(timers.size, 0);
+  nodes.get("live-toggle").events.click();
+  assert.equal(requests.length, 3);
+  pending.shift()(response());
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(timers.size, 1);
+  assert.equal(nodes.get("live-toggle").attributes["aria-pressed"], "false");
 });

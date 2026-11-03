@@ -47,6 +47,15 @@ td:first-child { font-weight: 550; }
 .service-table { max-height: 480px; overflow-y: auto; }
 .service-table th { position: sticky; top: 0; background: #121b26; padding-top: 8px; }
 .filters { display: flex; gap: 8px; flex-wrap: wrap; min-width: 0; }
+.toolbar { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; margin-bottom: 20px; }
+.list-controls { margin: 16px 0; }
+button.secondary { background: #192536; color: #d3e2f5; border-color: #3a4b60; }
+button:disabled { opacity: .55; cursor: wait; }
+button.row-button { background: none; border: 0; color: var(--blue); text-align: left; padding: 3px 0; font-size: inherit; overflow-wrap: anywhere; }
+button.row-button:hover { text-decoration: underline; }
+#cleanup-details { margin-top: 16px; }
+dialog { color: #e8edf5; background: #121b26; border: 1px solid #3a4b60; border-radius: 12px; padding: 24px; width: min(600px, calc(100% - 32px)); max-height: 85vh; overflow-y: auto; overflow-wrap: anywhere; }
+dialog::backdrop { background: #000a; }
 input, select, button { font: inherit; font-size: .8rem; border-radius: 7px; border: 1px solid #3a4b60; background: #0e1620; color: #e8edf5; padding: 10px 12px; max-width: 100%; }
 input { min-width: 0; }
 input:focus, select:focus, button:focus-visible { outline: 2px solid var(--blue); outline-offset: 3px; }

@@ -2,7 +2,7 @@
 
 The optional dashboard shows live disk availability and inode usage, CPU,
 RAM/swap, uptime, network throughput, top processes, system/user services,
-running Docker/Podman containers, and Janitor cache budgets and activity.
+Docker/Podman containers in all states, and Janitor cache budgets and activity.
 It is **read-only**: no cleanup, restart, terminal or arbitrary-command endpoints.
 It uses Python 3.10+ and local static assets; no npm build, metrics database,
 third-party scripts or telemetry.
@@ -142,7 +142,7 @@ It can only observe what its unprivileged user can access. It does not publish
 source, loosen [maintenance protections](cron-troubleshooting.md), or change
 the five-minute Janitor timer.
 
-Containers are queried with fixed, read-only `GET /containers/json` requests
+Containers are queried with fixed, read-only `GET /containers/json?all=1` requests
 over an existing local Unix socket, not privileged/Snap container launchers.
 Docker checks the user's runtime socket and `/var/run/docker.sock`; Podman uses
 the current user's existing `podman/podman.sock` under `$XDG_RUNTIME_DIR`.
@@ -150,6 +150,30 @@ No socket or daemon is automatically enabled and no permissions are widened.
 An installed engine without an available socket is explicitly **unknown**, not
 zero containers. `DOCKER_HOST` / `CONTAINER_HOST` may select a local `unix:///`
 endpoint; remote transports are deliberately rejected.
+Both running and stopped/created containers are included. Docker and the
+current user's Podman inventory have separate headings and engine/state filters.
+For user Podman, an operator can enable the private local socket with
+`systemctl --user enable --now podman.socket`; this does not start containers.
+The dashboard itself never enables sockets, starts containers or changes their
+state. Rootful/system Podman is not silently combined with the user's inventory.
+
+## Interactive viewing
+
+Use **Refresh now** to fetch the latest cached snapshot. **Pause updates** freezes
+this device's view without stopping server-side collection, maintenance or other
+clients. A manual refresh while paused fetches once and remains paused; Resume
+returns to live polling. Only one snapshot request runs at a time.
+
+Services can be searched, filtered and sorted; failed-first remains the default.
+Processes can be searched by name/PID and sorted by CPU, RAM or name **within
+the displayed top-process sample**, not as a new server-wide memory ranking.
+Docker/Podman filters include created and stopped containers.
+Chart ranges are relative to the most recent observation, including while paused.
+
+Tap a service, process or container name for dated snapshot details, or
+**View last cleanup** for the native Janitor result. These are inspection controls
+only: no stop/start/restart, delete, arbitrary command or cleanup endpoints are
+added to the login-free page. All detail text is rendered as text, not HTML.
 
 ## Machine interface and operations
 

@@ -273,7 +273,7 @@ class AccessTests(unittest.TestCase):
             def do_GET(self):
                 requests.append((self.command, self.path))
                 payload = json.dumps([{"Id": "123456789012345", "Names": ["/worker"],
-                                       "Image": "test", "Status": "Up",
+                                       "Image": "test", "Status": "Created", "State": "created",
                                        "Command": "private argument, never expose"}]).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(payload)))
@@ -288,8 +288,9 @@ class AccessTests(unittest.TestCase):
             try:
                 result = d.container_inventory(path)
                 self.assertEqual(result["items"][0]["Names"], "worker")
+                self.assertEqual(result["items"][0]["State"], "created")
                 self.assertNotIn("Command", result["items"][0])
-                self.assertEqual(requests, [("GET", "/containers/json")])
+                self.assertEqual(requests, [("GET", "/containers/json?all=1")])
             finally:
                 server.shutdown()
                 thread.join(timeout=3)
