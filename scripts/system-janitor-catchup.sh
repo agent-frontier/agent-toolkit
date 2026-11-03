@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Persistent-timer + disk-pressure companion for system-janitor:
-# - Checks every 15 minutes via systemd user timer (Persistent=true).
+# - Checks every 5 minutes via systemd user timer (Persistent=true).
 # - Triggers cleanup via agent-toolkit-cron ONLY when:
 #   (1) root filesystem usage >= JANITOR_PRESSURE_THRESHOLD_PCT (default: 75%), OR
 #   (2) the latest daily 03:17 cron slot (after 03:30 grace) was missed or failed.
@@ -29,7 +29,7 @@ while [ $# -gt 0 ]; do
       cat <<'EOF'
 Usage: system-janitor-catchup [--status] [--dry-run|-n] [--json]
 
-Evaluates two triggers on a 15-minute systemd user timer:
+Evaluates two triggers on a 5-minute systemd user timer:
   1. Disk pressure: root filesystem Use% >= JANITOR_PRESSURE_THRESHOLD_PCT (default 75),
      gated by JANITOR_PRESSURE_COOLDOWN_SEC (default 14400s / 4h) after a real run.
   2. Daily catch-up: latest daily 03:17 slot (after 03:30 grace) missed or failed.

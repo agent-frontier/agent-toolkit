@@ -148,7 +148,7 @@ suspended across `03:17`, and a once-daily schedule cannot react to intra-day
 `/tmp` build/container spikes. For systemd hosts, the repository ships an
 optional companion script (`scripts/system-janitor-catchup.sh`) and user units
 (`examples/systemd/system-janitor-catchup.{service,timer}`) that evaluate two
-triggers every 15 minutes (`OnCalendar=*:0/15`, `Persistent=true`):
+triggers every 5 minutes (`OnCalendar=*:0/5`, `Persistent=true`):
 
 1. **Daily catch-up:** the latest `03:17` slot (after a `03:30` grace window)
    has no healthy real `last-run.json` or its `agent-toolkit-cron` record failed.

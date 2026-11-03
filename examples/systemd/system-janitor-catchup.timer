@@ -1,10 +1,10 @@
 [Unit]
-Description=15-minute disk-pressure guard and daily catch-up timer for system-janitor
+Description=5-minute disk-pressure guard and daily catch-up timer for system-janitor
 
 [Timer]
-OnCalendar=*:0/15
+OnCalendar=*:0/5
 Persistent=true
-AccuracySec=1min
+AccuracySec=30s
 Unit=system-janitor-catchup.service
 
 [Install]
