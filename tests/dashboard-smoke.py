@@ -7,6 +7,8 @@ import json
 import os
 from pathlib import Path
 import re
+import socket
+import ssl
 import subprocess
 import socketserver
 import sys
@@ -125,6 +127,92 @@ class AccessTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
+
+    def tls_pair(self):
+        cert, key = Path(self.temp.name) / "server.crt", Path(self.temp.name) / "server.key"
+        subprocess.run(
+            ["openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+             "-subj", "/CN=dashboard-test", "-addext", "subjectAltName=IP:127.0.0.1",
+             "-keyout", str(key), "-out", str(cert)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=True, timeout=15,
+        )
+        key.chmod(0o600)
+        return cert, key
+
+    def test_lan_profile_fails_closed_and_url_uses_same_settings(self):
+        # A phone must not receive a plaintext, wildcard or stale localhost link.
+        cert, key = self.tls_pair()
+        config = Path(self.temp.name) / "config"
+        profile = config / "agent-toolkit/dashboard.json"
+        profile.parent.mkdir(parents=True)
+        valid = {"bind": "192.168.1.10", "allowed_networks": ["192.168.1.0/24"],
+                 "tls_cert": str(cert), "tls_key": str(key)}
+        args = d.argparse.Namespace(port=None, interval=None)
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(config)}):
+            self.assertEqual(d.server_settings(args)["bind"], "127.0.0.1")
+            for invalid in (
+                dict(valid, bind="0.0.0.0"), dict(valid, bind="8.8.8.8"),
+                dict(valid, bind="::"), dict(valid, allowed_networks=["0.0.0.0/0"]),
+                dict(valid, allowed_networks=[]), dict(valid, tls_key=None),
+                dict(valid, tls_cert=None, tls_key=None),
+                dict(valid, unexpected=True), {"tls_cert": False, "tls_key": False},
+            ):
+                profile.write_text(json.dumps(invalid))
+                with self.subTest(invalid=list(invalid)):
+                    with self.assertRaises((ValueError, OSError)):
+                        d.server_settings(args)
+            profile.write_text(json.dumps(valid))
+            key.chmod(0o644)
+            with self.assertRaises(ValueError):
+                d.server_settings(args)
+            key.chmod(0o600)
+            settings = d.server_settings(args)
+            self.assertEqual(settings["bind"], valid["bind"])
+            d.initialize_token(d.token_path())
+            output = subprocess.check_output(
+                [str(ROOT / "scripts/server-dashboard.py"), "--url"],
+                env=dict(os.environ), text=True,
+            )
+            self.assertTrue(output.startswith("https://192.168.1.10:8787/#token="))
+
+    def test_real_https_auth_origin_acl_and_stalled_handshake(self):
+        # TLS negotiation belongs in bounded workers, never the accept loop.
+        cert, key = self.tls_pair()
+        context = d.tls_context({"tls_cert": str(cert), "tls_key": str(key)})
+        client_context = ssl.create_default_context(cafile=str(cert))
+        token = d.secrets.token_urlsafe(32)
+        cache = d.Snapshot()
+        cache.publish({"private": "fixture"})
+        server = d.DashboardServer(("127.0.0.1", 0), d.handler_for(cache, token), context)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        stalled = socket.create_connection(("127.0.0.1", server.server_port), timeout=2)
+        try:
+            def request(headers=None):
+                client = http.client.HTTPSConnection(
+                    "127.0.0.1", server.server_port, context=client_context, timeout=2,
+                )
+                try:
+                    client.request("GET", "/api/snapshot", headers=headers or {})
+                    response = client.getresponse()
+                    response.read()
+                    return response.status
+                finally:
+                    client.close()
+            self.assertEqual(request(), 401)
+            auth = {"Authorization": "Bearer " + token}
+            self.assertEqual(request(auth), 200)
+            self.assertEqual(request(dict(auth, Host="foreign.invalid")), 403)
+            self.assertEqual(request(dict(auth, Origin=f"http://127.0.0.1:{server.server_port}")), 403)
+            self.assertEqual(request(dict(auth, Origin=f"https://127.0.0.1:{server.server_port}")), 200)
+            server.allowed_networks = [d.ipaddress.ip_network("192.168.1.0/24")]
+            with self.assertRaises((OSError, http.client.HTTPException)):
+                request(auth)
+        finally:
+            stalled.close()
+            server.shutdown()
+            server.server_close()
+            worker.join(timeout=3)
 
     def test_published_install_and_diagnostics_with_minimal_path(self):
         # Published commands must work from a fresh shell and not stop monitoring.

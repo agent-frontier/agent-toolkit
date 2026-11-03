@@ -30,7 +30,9 @@ The browser removes the token fragment from the address bar and keeps it only
 in that tab's session storage. Private JSON requires a bearer token even on
 localhost. Missing or insecure token files are explicit startup errors.
 
-The user service binds **only `127.0.0.1:8787`**, not a LAN/public interface.
+Without a profile, the user service binds **only `127.0.0.1:8787`**.
+Direct LAN access is an explicit HTTPS-only option below; wildcard and public
+addresses are rejected.
 It runs as the current user with `NoNewPrivileges`, bounded memory/tasks, and
 no added groups or socket permissions. Read-only behavior is enforced by its
 fixed observation paths and absence of control endpoints, not a read-only home
@@ -40,7 +42,56 @@ To start on boot without an interactive login, user lingering must already be
 enabled; inspect it with `loginctl show-user "$USER" -p Linger`. Enabling it is a
 host administration choice, not something the dashboard changes automatically.
 
-## Open from your own computer
+## Open directly from a phone on the LAN
+
+No SSH tunnel is needed in this mode. Configure
+`$XDG_CONFIG_HOME/agent-toolkit/dashboard.json` (default
+`~/.config/agent-toolkit/dashboard.json`) with your server's actual LAN IP,
+client subnet and certificate paths:
+
+```json
+{
+  "bind": "192.168.1.10",
+  "allowed_networks": ["192.168.1.0/24"],
+  "tls_cert": "~/.config/agent-toolkit/dashboard-lan.crt",
+  "tls_key": "~/.config/agent-toolkit/dashboard-lan.key"
+}
+```
+
+Only explicit RFC1918 IPv4 addresses/CIDRs are accepted. LAN mode requires a
+certificate and an owned private regular key file (mode0600), never plaintext
+HTTP. Use an existing suitable certificate or generate a local one **once**,
+changing the example IP to the server's address. Do not overwrite an existing
+certificate/key. For a nondefault XDG config directory, adjust the profile's
+paths to the actual generated files.
+
+```bash
+cfg="${XDG_CONFIG_HOME:-$HOME/.config}/agent-toolkit"
+umask 077
+openssl req -x509 -newkey rsa:3072 -nodes -days 365 \
+  -subj "/CN=Private dashboard" -addext "subjectAltName=IP:192.168.1.10" \
+  -keyout "$cfg/dashboard-lan.key" -out "$cfg/dashboard-lan.crt"
+systemctl --user restart agent-toolkit-dashboard.service
+agent-toolkit-dashboard --url
+```
+
+Open the printed private HTTPS link on your phone on the same LAN; you can also
+open `https://192.168.1.10:8787` and enter the token. A self-signed local
+certificate needs a one-time browser trust decision: verify its fingerprint
+against the server before trusting it, or use a certificate your phone already
+trusts. Inspect the fingerprint with
+`openssl x509 -in "$cfg/dashboard-lan.crt" -noout -fingerprint -sha256`.
+The application still requires the token after TLS trust. Clients outside the
+configured subnets, wrong Host/Origin values and public/wildcard binds are denied.
+The dashboard does not enable a firewall, router forwarding or public access.
+
+If the address comes from DHCP, reserve it in your router to keep the bookmark
+stable. A changed/unavailable bind address fails visibly rather than silently
+falling back to a public listener. To return to localhost mode, restore/remove
+the optional profile and restart only the dashboard. Do not leave unused LAN
+configuration behind when reverting.
+
+## Open through SSH instead (default localhost mode)
 
 Keep an SSH tunnel running on your computer:
 
@@ -50,8 +101,8 @@ ssh -N -L 127.0.0.1:8787:127.0.0.1:8787 USER@SERVER
 
 Then open the private link printed by `agent-toolkit-dashboard --url` on the
 server. Alternatively, visit `http://127.0.0.1:8787` and enter the token.
-Do not expose this listener through a public reverse proxy: its intended remote
-transport is the encrypted SSH tunnel, not public HTTP.
+Do not expose this listener through a public reverse proxy. Supported remote
+transports are the SSH tunnel or the explicit, subnet-limited LAN HTTPS profile.
 
 ## What the numbers mean
 
@@ -111,7 +162,11 @@ JSON with `Authorization: Bearer TOKEN`; missing/invalid auth returns 401,
 foreign Host/Origin returns 403, warming-up returns 503, and mutation methods
 return 405. Token values never belong in query strings or command arguments.
 Port defaults to 8787 (`--port`), sampling to five seconds (`--interval 2..60`).
-If changing the service port, use the same `--port` with `--url` and the tunnel.
+The shared profile may also set `port` and `interval`; explicit CLI values
+override them. `--url` reads the same profile and prints the configured scheme,
+address and port, so phones do not receive a stale localhost link. If overriding
+the service port on its command line, use the same `--port` with `--url` and any
+tunnel. Discovery retains the default-loopback capability and adds `lan-https`.
 
 To rotate a token, stop the service, move its private token file to a private
 backup, rerun `--init`, and restart. Existing browser sessions will need the new

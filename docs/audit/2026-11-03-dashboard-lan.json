@@ -1,0 +1,47 @@
+{
+  "format_version": 1,
+  "date": "2026-11-03",
+  "scope": "Incremental direct-phone LAN access to the existing private dashboard",
+  "baseline": "The base dashboard's four-persona documentation audit remains in 2026-11-03-dashboard.json. This increment carries it forward and includes the changed phone/TLS instructions in focused independent spec and quality passes; it does not claim four new persona reviews.",
+  "review": {
+    "spec": "PASS, tier-1 direct-phone LAN satisfaction96/100;27 secret-free policy checks",
+    "quality": "PASS; focused HTTPS/localhost regressions, profile policy, discovery and real-socket source-ACL-before-TLS counterfactual"
+  },
+  "actions": [
+    {
+      "class": "Agent action",
+      "status": "resolved",
+      "finding": "The initial localhost-only access assumption required SSH and did not match the operator's explicit phone-on-LAN workflow.",
+      "remedy": "Add an optional shared HTTPS profile for server and private-link generation, explicit RFC1918 bind and client CIDRs, and bounded-worker TLS. Preserve localhost defaults and existing token/read-only protections."
+    },
+    {
+      "class": "Operator action",
+      "status": "one-time local trust",
+      "finding": "A self-signed local certificate is not automatically trusted by a phone.",
+      "remedy": "Verify the certificate fingerprint against the server before trusting it, or use a certificate the phone already trusts. The application still requires the private token."
+    },
+    {
+      "class": "Operator action",
+      "status": "environment dependent",
+      "finding": "A DHCP address can change and a guest/isolated Wi-Fi network may not reach the server LAN.",
+      "remedy": "Use the same allowed LAN and reserve the address when a stable bookmark is needed; do not widen the bind or disable network gates as a fallback."
+    }
+  ],
+  "evidence": {
+    "python_cases": 11,
+    "node_cases": 2,
+    "default_behavior": "All original localhost, authentication, source and UI regressions preserved",
+    "real_tls_fixture": "Trusted certificate;401/200/403; client-CIDR denial; held raw handshake does not block another valid client",
+    "configuration": "Missing TLS, bad pairs/types/keys, wildcard/public addresses, missing/public client CIDRs and unknown settings rejected",
+    "live_endpoint": "Existing enabled user service listens on only the selected real LAN IPv4 address; native CA/IP verification and authentication/Host/Origin checks pass",
+    "browser": "Actual LAN HTTPS origin, explicit matching SPKI pin, desktop and390px mobile, removed token fragment, live metrics/services/filtering and offline recovery",
+    "secrets": "Key, certificate, profile and token remain outside Git; existing token and OS permissions unchanged",
+    "ruggedness": "One current RUGGED review with field rungs4/5"
+  },
+  "limits": [
+    "No physical phone or independent LAN device was available; real server LAN and phone-sized browser results are not a physical-device claim.",
+    "Local certificate trust and DHCP stability remain operator/environment concerns.",
+    "No router, global firewall, group, container-daemon or cleanup-job changes.",
+    "The four unrelated pre-existing strict documentation-site link warnings remain outside this increment."
+  ]
+}

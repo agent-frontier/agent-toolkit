@@ -7,6 +7,7 @@ import datetime as dt
 import hmac
 import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
 import json
 import logging
 import math
@@ -17,6 +18,7 @@ import secrets
 import shutil
 import signal
 import socket
+import ssl
 import stat
 import subprocess
 import sys
@@ -25,11 +27,13 @@ import time
 from urllib.parse import urlsplit
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 LIMIT = 2 * 1024 * 1024
 ASSETS = Path(__file__).resolve().parent.parent / "dashboard"
-CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "loopback-only",
+CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "lan-https", "loopback-only",
                        "read-only", "snapshot-json", "systemd-services"])
+PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
+                         ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 
 
 def utc():
@@ -42,6 +46,72 @@ def xdg(variable, fallback):
 
 def token_path():
     return xdg("XDG_CONFIG_HOME", ".config") / "agent-toolkit/dashboard-token"
+
+
+def server_settings(args):
+    profile = xdg("XDG_CONFIG_HOME", ".config") / "agent-toolkit/dashboard.json"
+    settings = {"bind": "127.0.0.1", "port": 8787, "interval": 5,
+                "tls_cert": None, "tls_key": None, "allowed_networks": []}
+    configured = read_state(profile) or {}
+    if set(configured) - set(settings):
+        raise ValueError("unknown dashboard profile setting")
+    settings.update(configured)
+    for key in ("port", "interval"):
+        if getattr(args, key) is not None:
+            settings[key] = getattr(args, key)
+    if any(not isinstance(settings[key], int) or isinstance(settings[key], bool)
+           for key in ("port", "interval")) or not (
+        1024 <= settings["port"] <= 65535 and 2 <= settings["interval"] <= 60
+    ):
+        raise ValueError("port must be 1024..65535 and interval must be 2..60 seconds")
+    if not isinstance(settings["bind"], str):
+        raise ValueError("bind must be one explicit IPv4 address")
+    address = ipaddress.ip_address(settings["bind"])
+    if address.version != 4 or not (
+        address.is_loopback or any(address in network for network in PRIVATE_NETWORKS)
+    ):
+        raise ValueError("bind must be loopback or one RFC1918 LAN IPv4 address, never wildcard/public")
+    settings["bind"] = str(address)
+    raw_networks = settings["allowed_networks"]
+    if not isinstance(raw_networks, list) or any(not isinstance(value, str) for value in raw_networks):
+        raise ValueError("allowed_networks must be a list of private IPv4 CIDRs")
+    networks = [ipaddress.ip_network(value) for value in raw_networks]
+    if any(network.version != 4 or not any(network.subnet_of(base) for base in PRIVATE_NETWORKS)
+           for network in networks):
+        raise ValueError("LAN client CIDRs must stay inside RFC1918 private networks")
+    if address.is_loopback:
+        networks.append(ipaddress.ip_network("127.0.0.0/8"))
+    elif not networks or not any(address in network for network in networks):
+        raise ValueError("LAN binding requires explicit allowed_networks containing the server address")
+    settings["allowed_networks"] = networks
+    cert, key = settings["tls_cert"], settings["tls_key"]
+    if (cert is None) != (key is None):
+        raise ValueError("TLS requires both tls_cert and tls_key")
+    if not address.is_loopback and not (cert and key):
+        raise ValueError("LAN access requires HTTPS; configure tls_cert and tls_key")
+    if cert is not None:
+        if not isinstance(cert, str) or not isinstance(key, str) or not cert or not key:
+            raise ValueError("TLS certificate and key must be file paths")
+        for name in ("tls_cert", "tls_key"):
+            path = Path(settings[name]).expanduser()
+            if not path.is_absolute():
+                raise ValueError("TLS file paths must be absolute or start with ~/")
+            info = path.lstat()
+            if not stat.S_ISREG(info.st_mode):
+                raise ValueError("TLS files must be regular files, not symlinks")
+            if name == "tls_key" and (info.st_uid != os.getuid() or info.st_mode & 0o077):
+                raise ValueError("TLS private key must be owned and private (chmod 600)")
+            settings[name] = str(path)
+    return settings
+
+
+def tls_context(settings):
+    if not settings["tls_cert"]:
+        return None
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.minimum_version = ssl.TLSVersion.TLSv1_2
+    context.load_cert_chain(settings["tls_cert"], settings["tls_key"])
+    return context
 
 
 def read_token(path):
@@ -417,9 +487,15 @@ class Snapshot:
 class DashboardServer(ThreadingHTTPServer):
     daemon_threads = True
 
-    def __init__(self, address, handler):
+    def __init__(self, address, handler, context=None, networks=None):
         self.slots = threading.BoundedSemaphore(12)
+        self.tls = context
+        self.allowed_networks = networks if networks is not None else [ipaddress.ip_network("127.0.0.0/8")]
         super().__init__(address, handler)
+
+    def verify_request(self, request, client_address):
+        peer = ipaddress.ip_address(client_address[0])
+        return any(peer in network for network in self.allowed_networks)
 
     def get_request(self):
         connection, address = super().get_request()
@@ -438,6 +514,14 @@ class DashboardServer(ThreadingHTTPServer):
 
     def process_request_thread(self, request, client_address):
         try:
+            if self.tls is not None:
+                try:
+                    request = self.tls.wrap_socket(request, server_side=True, do_handshake_on_connect=False)
+                    request.do_handshake()
+                except OSError as error:
+                    logging.warning("TLS connection rejected: %s", type(error).__name__)
+                    self.shutdown_request(request)
+                    return
             super().process_request_thread(request, client_address)
         finally:
             self.slots.release()
@@ -468,13 +552,17 @@ def handler_for(snapshot, token):
                 self.wfile.write(body)
 
         def do_GET(self):
-            hosts = {f"127.0.0.1:{self.server.server_port}", f"localhost:{self.server.server_port}"}
+            bind = self.server.server_address[0]
+            hosts = {f"{bind}:{self.server.server_port}"}
+            if ipaddress.ip_address(bind).is_loopback:
+                hosts.add(f"localhost:{self.server.server_port}")
+            scheme = "https" if self.server.tls else "http"
             host = self.headers.get("Host", "")
             origin = self.headers.get("Origin")
             if host not in hosts or self.headers.get("Sec-Fetch-Site") == "cross-site" or (
-                origin is not None and origin not in {f"http://{host}", f"https://{host}"}
+                origin is not None and origin != f"{scheme}://{host}"
             ):
-                return self.respond(403, b'{"error":"local same-origin requests only"}')
+                return self.respond(403, b'{"error":"configured same-origin requests only"}')
             route = urlsplit(self.path)
             if route.query:
                 return self.respond(404, b'{"error":"not found"}')
@@ -508,12 +596,13 @@ def handler_for(snapshot, token):
     return Handler
 
 
-def serve(port, interval, token):
+def serve(settings, token, context):
     for asset in ("index.html", "app.js", "style.css"):
         if not (ASSETS / asset).is_file():
             raise ValueError(f"dashboard asset missing: {asset}")
     cache, stop = Snapshot(), threading.Event()
     collector = Collector()
+    interval = settings["interval"]
 
     def sample():
         while not stop.is_set():
@@ -523,10 +612,12 @@ def serve(port, interval, token):
             cache.publish(value)
             stop.wait(max(0.1, interval - (time.monotonic() - started)))
 
-    server = DashboardServer(("127.0.0.1", port), handler_for(cache, token))
+    server = DashboardServer((settings["bind"], settings["port"]), handler_for(cache, token),
+                             context, settings["allowed_networks"])
     worker = threading.Thread(target=sample, name="dashboard-sampler", daemon=True)
     worker.start()
-    logging.info("Read-only dashboard listening on http://127.0.0.1:%s", port)
+    scheme = "https" if context else "http"
+    logging.info("Read-only dashboard listening on %s://%s:%s", scheme, settings["bind"], settings["port"])
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -550,10 +641,12 @@ def main():
     actions.add_argument("--snapshot", action="store_true", help="print one read-only JSON observation")
     actions.add_argument("--version", action="store_true")
     parser.add_argument("--json", action="store_true", help="machine output with --version or --snapshot")
-    parser.add_argument("--port", type=int, default=8787)
-    parser.add_argument("--interval", type=int, default=5, help="nominal sampling interval, 2..60 seconds")
+    parser.add_argument("--port", type=int, help="override profile port (default 8787)")
+    parser.add_argument("--interval", type=int, help="override nominal sampling interval, 2..60 (default 5)")
     args = parser.parse_args()
-    if not 1024 <= args.port <= 65535 or not 2 <= args.interval <= 60:
+    if (args.port is not None and not 1024 <= args.port <= 65535) or (
+        args.interval is not None and not 2 <= args.interval <= 60
+    ):
         raise ValueError("port must be 1024..65535 and interval must be 2..60 seconds")
     if args.json and not (args.version or args.snapshot):
         raise ValueError("--json requires --version or --snapshot")
@@ -568,15 +661,18 @@ def main():
         print(json.dumps(value, ensure_ascii=True, allow_nan=False))
         return 4 if value["status"] == "degraded" else 0
     else:
+        settings = server_settings(args)
+        context = tls_context(settings)
         try:
             token = read_token(token_path())
         except FileNotFoundError as error:
             raise ValueError("run --init once to create the private dashboard token") from error
         if args.url:
-            print(f"http://127.0.0.1:{args.port}/#token={token}")
+            scheme = "https" if context else "http"
+            print(f"{scheme}://{settings['bind']}:{settings['port']}/#token={token}")
         else:
             signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
-            serve(args.port, args.interval, token)
+            serve(settings, token, context)
     return 0
 
 
