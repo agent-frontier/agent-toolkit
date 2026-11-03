@@ -1,0 +1,332 @@
+{
+  "format_version": 1,
+  "date": "2026-11-03",
+  "baseline": "3bad69da0a0abf38a90ba08811f2149966b3dc1b",
+  "scope": "Already-completed, user-requested dashboard FEATURE+UX review: four perspectives, three actual rounds, Standard design-only. This is consolidation, not another app/code review or implementation approval.",
+  "review_result": "Three rounds complete; majority roadmap with preserved 3-to-1 N1-versus-N2 sequencing dissent. All implementation actions remain proposed/unbuilt.",
+  "method": "Four perspectives independently inspected product source and labelled browser evidence in Round 1, challenged named peers in Round 2, and revised or defended priorities in Round 3. A technical-writer role consolidated those records and the N1 plan gate without another product/host survey. Consolidation verified instructions, the prior audit reference and CI entry points; it ran no live actions or test suites.",
+  "sources": [
+    "Supplied dashboard-ux-review-charter.json",
+    "Supplied dashboard-ux-conversations.json",
+    ".wgm/rugged/dashboard-feature-ux-plan.json",
+    "docs/audit/2026-11-03-dashboard-actions.json",
+    ".github/workflows/ci.yml:44-49"
+  ],
+  "reviewers": [
+    {"id": "operator", "persona": "Phone-first homelab operator/newcomer", "final_order": ["N1", "N2", "N3", "N5", "N4"]},
+    {"id": "frontend", "persona": "Senior frontend UX/accessibility engineer", "final_order": ["N1", "N2", "N3", "N5", "N4"]},
+    {"id": "operations", "persona": "Principal operations/architecture engineer", "final_order": ["N2", "N1", "N3", "N5", "N4"]},
+    {"id": "product", "persona": "Product/value prioritization reviewer", "final_order": ["N1", "N2", "N3", "N5", "N4"]}
+  ],
+  "runtime_continuity": {
+    "round_one": "Four independent persona contexts; default synchronous dispatch, with operations automatically backgrounded.",
+    "between_rounds_one_and_two": "The attempted multi-recipient follow-up delivered no messages because three synchronous contexts could not accept it. Those three were explicitly rotated to replacement background contexts using the common four-persona Round 1 record; operations retained its context.",
+    "rounds_two_and_three": "Named cross-critiques used common records. Round 3 reused the four Round 2 contexts.",
+    "voting_limit": "Four perspectives, not seven independent votes or twelve independent reviewers. Later rounds are revisions, not extra votes. No human-participant or model-diversity claim."
+  },
+  "evidence": {
+    "visual_baseline": {
+      "labelled_captures": 8,
+      "actual_browser_viewports": ["390x844", "1440px wide"],
+      "fictional_scenario_captures": 3,
+      "limit": "Actual narrow/desktop views and labelled fictional scenarios are distinct. Scenarios are not observed real workload operations; no screenshot contents are republished.",
+      "mutation_requests_attempted": 0,
+      "physical_phone_test": false
+    },
+    "existing_controls": "Separately field-proven in the earlier actions audit using disposable native fixtures, including Cancel, container controls and retained volumes. That evidence was recorded before this review and was not rerun here.",
+    "new_review_mutations": 0,
+    "adjudication_limit": "UX observations and recorded code-derived focus/retry concerns are design hypotheses, not newly reproduced physical-phone failures. Proposed receipts, exact reads and future features have no implementation proof from these captures.",
+    "command_verification": "The supplied record resolved the harness handoff against CI and the unittest entry point. This consolidation also read CI lines 44-49; it did not rerun the suites."
+  },
+  "rounds": [
+    {
+      "round": 1,
+      "phase": "Independent evidence-backed critique",
+      "status": "complete; four responses",
+      "seed_legend": {
+        "F08": "Phone reachability/navigation",
+        "F02": "Action outcome reconciliation",
+        "F05": "Workload recovery, later narrowed to Start",
+        "F07": "Attention/history proposals",
+        "F03": "CPU/RAM attribution",
+        "F04": "Target logs"
+      },
+      "positions": [
+        {
+          "reviewer": "operator",
+          "initial_order": ["F08", "F02", "F05"],
+          "position": "Find the intended app, stop it, understand the outcome and recover without a terminal. Long scrolling, small target links and disconnected details/observations impede that job. Bounded container CPU/RAM and logs follow a trustworthy control loop; broad scans, bulk control and longer retention wait.",
+          "recorded_citations": ["dashboard/index.html:29-59", "dashboard/style.css:47-58", "dashboard/app.js:45-59,68-78,108-131", "scripts/dashboard_actions.py:134-165,294-333"]
+        },
+        {
+          "reviewer": "frontend",
+          "initial_order": ["F08", "F02", "F05"],
+          "position": "Improve hierarchy and target identity; address refresh-replaced interactive nodes, accessible dialog naming/focus and disconnected unknown/paused outcomes. Prefer immediate reconciliation over extensive history. Start is narrower than Restart and cannot undo Remove; bounded logs precede broad collection.",
+          "recorded_citations": ["dashboard/index.html:37-64", "dashboard/style.css:40-48,79", "dashboard/app.js:55-56,103-106,121-131,164-183,330-336", "scripts/dashboard_actions.py:294-330"]
+        },
+        {
+          "reviewer": "operations",
+          "initial_order": ["F02", "F05", "F08+F07"],
+          "position": "Separate command outcome, later target state and application health. Reuse bounded journal evidence plus an exact-target observation, never sampled-list disappearance. Initially favored Start second, navigation with existing attention signals, logs before broad attribution, and deferred broad storage scanning while exposing cached age/coverage.",
+          "recorded_citations": ["dashboard/app.js:45-56,70-79,108-131", "scripts/dashboard_actions.py:148-165,294-334", "scripts/server-dashboard.py:247-270,383-416", "dashboard/index.html:50-59"]
+        },
+        {
+          "reviewer": "product",
+          "initial_order": ["F08+F02", "F05", "F03"],
+          "position": "Initially bundled minimal shortcuts and action reconciliation, then Start for one existing container. Logs versus metrics remained uncertain; recurring storage pressure could elevate bounded storage explanation. Sorting a CPU-limited sample by RAM would not establish a true memory ranking.",
+          "recorded_citations": ["dashboard/app.js:56,71-78,123-131", "scripts/dashboard_actions.py:147-165,305-330", "scripts/server-dashboard.py:247-272,415-416"]
+        }
+      ]
+    },
+    {
+      "round": 2,
+      "phase": "Named cross-persona rebuttals and changed positions",
+      "status": "complete; four responses to shared records",
+      "positions": [
+        {
+          "reviewer": "operator",
+          "order": ["N1", "N2", "N3"],
+          "rebuttal": "To product: the combined first job need not be bundled delivery. To operations: Start-second underweights the recurring storage job.",
+          "change": "Elevated bounded storage above Start and new metrics; selected existing exact-container Stop feedback first, with navigation independently parallel.",
+          "failure_focus": "Lost terminal audit/response, stale or capped inventory and same-name replacement must preserve uncertainty without resend."
+        },
+        {
+          "reviewer": "frontend",
+          "order": ["N1", "N2", "N3"],
+          "rebuttal": "To product: bundling navigation risks a redesign dependency. To operations: missing terminal records must not invite retries; storage explanation deserves earlier delivery than Start/metrics.",
+          "change": "Promoted bounded storage and explicitly separated navigation from exact-action feedback. Kept immutable identity, named dialog, retained/return focus and announced outcomes in the Stop journey.",
+          "failure_focus": "Audit/response loss plus failed observation stays unknown; read-only recovery neither replays the operation nor steals focus."
+        },
+        {
+          "reviewer": "operations",
+          "order": ["N2", "N1", "N3"],
+          "rebuttal": "To frontend/product: navigation-first cannot establish exact observation, while existing dated storage data can cheaply serve the original recurring job.",
+          "change": "Retracted deferring bounded storage explanation and the unnecessary larger history proposal; retained rejection of broad scans. Chose provenance/policy explanation first and navigation in parallel.",
+          "failure_focus": "Old measurements, fresh filesystem samples, missing coverage and protected work must not become an unexplained total or unsupported reclaim amount."
+        },
+        {
+          "reviewer": "product",
+          "order": ["N1", "N2", "N3"],
+          "rebuttal": "To operator/operations: intentionally empty inventories do not establish weak recovery demand; cached storage explanation is a completed user job, not incidental metadata.",
+          "change": "Dropped metrics from the top three; moved bounded storage to second and Start to third. Selected one existing container Stop rather than every action family; navigation is parallel.",
+          "remaining_question": "Logs versus resource diagnosis remained unresolved in this round; loss of response must not create a receipt, name-match or automatic replay."
+        }
+      ],
+      "shared_boundary": "No new mutation in N1. N3 initially covers existing stopped Docker/current-user Podman containers only; user-unit recovery is later. Exact not-found is absent, not stopped; capped-list absence proves neither."
+    },
+    {
+      "round": 3,
+      "phase": "Final votes, first-slice boundaries and acceptance designs",
+      "status": "complete; four final responses",
+      "positions": [
+        {
+          "reviewer": "operator",
+          "order": ["N1", "N2", "N3"],
+          "response": "Accepted operations' cheaper N2 argument but retained N1 first because ambiguous existing mutations are an immediate control risk.",
+          "later_order": ["N5", "N4"],
+          "validation_handoff": "Named ordered-identity, once/read-only-refresh and unknown-attempt cases; declined to invent a missing harness invocation."
+        },
+        {
+          "reviewer": "frontend",
+          "order": ["N1", "N2", "N3"],
+          "response": "Accepted operations' N2 cost/value case while preserving N1 priority. Required real linked receipt versus unlinked attempt, separate exact state and accessible focus-preserving feedback.",
+          "later_order": ["N5", "N4"],
+          "validation_handoff": "Named identity, audit/response loss, paused recovery and confirm/Cancel cases; flagged omitted runnable commands."
+        },
+        {
+          "reviewer": "operations",
+          "order": ["N2", "N1", "N3"],
+          "response": "Accepted product's description of storage explanation as a completed job, but kept it first because it needs no new collection loop. No scan, unexplained overlapping total or unsupported reclaim claim.",
+          "later_order": ["N5", "N4"],
+          "validation_handoff": "Supplied existing focused collector/action/UI commands and named future provenance, missing-data, no-extra-I/O, identity, receipt-loss, paused and no-replay cases."
+        },
+        {
+          "reviewer": "product",
+          "order": ["N1", "N2", "N3"],
+          "response": "Accepted the cheaper storage increment but retained N1 first because ambiguous mutation outcomes have consequences.",
+          "later_order": ["N5", "N4"],
+          "change": "Resolved earlier logs-versus-metrics uncertainty in favor of logs first.",
+          "validation_handoff": "Named identity/loss/confirm/paused cases, but its generic test invocation was erroneous; the handoff was subsequently corrected against CI, not copied."
+        }
+      ],
+      "final_tally": {"N1_first": 3, "N2_first": 1, "N3_third": 4, "navigation_parallel": 4, "N5_before_N4": 4}
+    }
+  ],
+  "consolidated_report": {
+    "rank": ["N1", "N2", "N3", "N5", "N4"],
+    "decision": "Recommend N1 reach-and-understand feedback, then N2 known-measurement provenance/policy, N3 existing-container Start, N5 bounded manual target logs and N4 bounded CPU/RAM diagnosis. This is a majority recommendation, not unanimous sequencing or authorization.",
+    "parallel": "Minimal phone section jumps, readable rows, touch targets and focus continuity are independent parallel work: neither prerequisite nor replacement for outcome checks.",
+    "rugged_plan": {
+      "source": ".wgm/rugged/dashboard-feature-ux-plan.json",
+      "mode": "plan",
+      "verdict": "RUGGED",
+      "meaning": "Readiness of the proposed N1 validation plan only; not feature, implementation or physical-phone proof.",
+      "implementation_judged": false
+    }
+  },
+  "actions": [
+    {
+      "id": "N1",
+      "class": "Agent action",
+      "status": "proposed/unbuilt",
+      "job": "Reach one existing container Stop and understand the available command evidence and separately observed state.",
+      "includes": [
+        "One existing single-container Stop journey with Docker/current-user Podman parity and unchanged authority, confirmation and protection policy; no new mutation type.",
+        "Carry engine plus immutable full container ID through the action and separately sequenced exact read. Only an exact read ordered after the attempt in server/transport execution can supply the newer observation; page generation or client/server clock comparisons cannot.",
+        "Only actual server journal records with real action IDs are receipts. If response/action ID is lost, preserve an unlinked browser attempt; never invent a receipt or correlate by name/time.",
+        "Keep command outcome, current observed running/stopped/absent/unknown state and application health separate. Exact not-found means absent, not stopped; a later state does not establish command causation.",
+        "Reuse existing journal/rotation: proposed maximum 20 actual records from a bounded 64 KiB tail, with truncation, unavailable history and missing terminal evidence explicit. Outside-window records remain unknown.",
+        "Typed exact-target read reusing the shared total-deadline Unix helper with a proposed 2-second budget; explicit read-only Check state, named dialog, safe/retained/return focus, announced results, duplicate-confirm prevention and inert Cancel."
+      ],
+      "excludes": [
+        "Start/Restart, other mutation families, root authority, automatic mutation replay, sampled-inventory absence as proof, invented receipts or name/time linkage.",
+        "Navigation redesign, fleet-health scoring, metrics database, expanded retention, generic shell/proxy, filesystem scans, deletion controls, new authentication or stack.",
+        "Sampled-inventory fallback, automatic disruptive retry or an unbounded/background exact-read retry loop."
+      ],
+      "phone_journey": [
+        "Reach the workload section directly or through an independently delivered section jump; find a readable engine/identity-labelled existing target row.",
+        "Open the target and its Stop confirmation; preserve the immutable identity and safe focus through refresh. Confirm once, or Cancel without dispatch.",
+        "Read the actual linked receipt if its action ID is available; otherwise see an explicitly unlinked uncertain attempt.",
+        "Read a separately ordered exact-target observation, or use read-only Check state after failure. Unknown may remain even when a later state is visible; paused stays paused.",
+        "Return focus to the target row, or its section heading if the row is gone, without retrying the mutation."
+      ],
+      "validation": "Future P1-P4 below; none implemented or run in this review."
+    },
+    {
+      "id": "N2",
+      "class": "Agent action",
+      "status": "proposed/unbuilt",
+      "job": "Explain known storage measurements and policy, not a complete disk breakdown.",
+      "includes": "Show each existing source, measurement age, scope/coverage and separately dated filesystem availability; distinguish measurements, estimates and supported reclaimability from protected/deferred work and the last actual cleanup. Missing data is unknown, not zero.",
+      "excludes": "Unexplained sums of overlapping sources, complete-attribution claims, unsupported reclaim promises, new scans/collection loops or deletion controls.",
+      "validation": "Future N2_provenance_not_reclaimability, N2_missing_and_recovery and N2_no_extra_io: mixed-age/overlapping data remains separate, missing coverage stays unknown, later records update only supported facts, and the panel adds no scan or mutation."
+    },
+    {
+      "id": "N3",
+      "class": "Agent action",
+      "status": "proposed/unbuilt",
+      "job": "Start only one existing stopped Docker/current-user Podman container within existing authority, with parity and exact-target protections.",
+      "excludes": "Root controls, pull, create, enable, process launching, user-unit Start and Restart initially. Start cannot recover a removed container."
+    },
+    {
+      "id": "N5",
+      "class": "Agent action",
+      "status": "proposed/unbuilt",
+      "job": "Manually read one bounded target-specific diagnostic log excerpt.",
+      "bounds": "Proposed 100-200 lines plus byte/time caps; explicit truncation and unavailable states. No follow mode, global log browser or retained copy."
+    },
+    {
+      "id": "N4",
+      "class": "Agent action",
+      "status": "proposed/unbuilt",
+      "job": "Bounded on-demand CPU/RAM diagnosis, after logs.",
+      "bounds": "Distinguish selected-container diagnosis from true whole-host rankings. RAM sorting of the CPU top sample is not a full memory ranking; high CPU alone may be healthy work. No broad attribution system or expanded metrics retention."
+    },
+    {
+      "id": "UX",
+      "class": "Agent action",
+      "status": "proposed/unbuilt",
+      "job": "Independently deliver minimal phone section jumps, readable target rows, touch targets and focus continuity.",
+      "boundary": "Parallel, not prerequisite or substitute for N1 outcome checks; no navigation redesign or forced bundling."
+    },
+    {
+      "id": "O1",
+      "class": "Operator action",
+      "status": "future decision",
+      "job": "Decide whether to authorize implementation and choose N1-first or the reasonable cheaper N2-first alternative.",
+      "deferred_decisions": ["Restart", "user-unit Start", "bulk mutation", "broad filesystem scans", "expanded metrics retention", "root controls", "new authentication/stack"],
+      "boundary": "The completed review grants no implementation consent; deferred options are not approved scope."
+    },
+    {
+      "id": "O2",
+      "class": "Operator action",
+      "status": "future verification after implementation",
+      "job": "On an actual LAN phone, verify the implemented journey using only a disposable target prepared by the agent: open the existing bookmark, inspect identity, Cancel, confirm Stop once, reconnect and inspect the receipt or uncertainty with a read-only recheck.",
+      "boundary": "No owner-side terminal or new login step. Persistent data and unrelated targets remain untouched. If no physical phone is available, retain that explicit delivery-verification gap rather than equating a narrow browser with hardware proof."
+    }
+  ],
+  "agent_actions": ["N1", "N2", "N3", "N5", "N4", "UX"],
+  "operator_actions": ["O1", "O2"],
+  "validation_design": {
+    "status": "Future case extensions/probes only: not implemented, not run and not already-passing feature evidence.",
+    "origin": "Extend existing offline fake-Unix-peer/HTTP/action and actual-app VM harnesses; no host engine sockets or real workloads. A future narrow-browser fixture intercepts all mutation POSTs.",
+    "ci_source": ".github/workflows/ci.yml:44-49",
+    "exact_ci_commands": [
+      "python3 ./tests/dashboard-smoke.py",
+      "python3 ./tests/dashboard-actions-smoke.py",
+      "node --test ./tests/dashboard-ui-smoke.cjs",
+      "node --check dashboard/app.js"
+    ],
+    "recorded_focused_N2_command": "python3 -B tests/dashboard-smoke.py CollectorTests && node --test tests/dashboard-ui-smoke.cjs",
+    "handoff_resolution": "Dedicated commands were verified, not rerun. The supplied record also verifies CollectorTests at tests/dashboard-smoke.py:27. The product/PM generic invocation is rejected; no new suite success is claimed.",
+    "cases": [
+      {
+        "id": "P1",
+        "command": "python3 -B tests/dashboard-actions-smoke.py && python3 -B tests/dashboard-smoke.py && node --test tests/dashboard-ui-smoke.cjs",
+        "extensions": ["stop_receipt_followed_by_sequenced_exact_read", "old_snapshot_and_newer_page_generation_do_not_verify", "same_name_new_id_and_capped_inventory_absence_do_not_verify", "client_server_clock_skew_does_not_change_freshness"],
+        "assert": "Only the original engine/full-ID exact read sequenced after the attempt supplies the newer observation. A newer page, stale snapshot, capped-list disappearance, clock skew or same-name replacement cannot verify it. Exact not-found is absent, not stopped.",
+        "recovery": "Restore exact reads and update only observed state without replay; command causality and app health remain separate."
+      },
+      {
+        "id": "P2",
+        "command": "python3 -B tests/dashboard-actions-smoke.py && node --test tests/dashboard-ui-smoke.cjs",
+        "extensions": ["initial_audit_enospc_blocks_dispatch", "terminal_audit_enospc_plus_lost_response_stays_unknown", "lost_action_id_does_not_correlate_by_target_name_or_time", "reopen_and_read_only_recheck_never_replay_mutation"],
+        "assert": "Initial audit failure sends nothing. Post-dispatch audit/response loss remains uncertain even if the target is later stopped. Only actual journal records are receipts; a lost action ID leaves the browser attempt unlinked.",
+        "recovery": "Restore audit/transport and reread the exact original identity; retain uncertainty and never infer linkage, causality or automatic resend."
+      },
+      {
+        "id": "P3",
+        "command": "python3 -B tests/dashboard-smoke.py && node --test tests/dashboard-ui-smoke.cjs",
+        "extensions": ["exact_read_trickle_hits_total_deadline", "history_tail_and_record_count_are_bounded_and_truncation_visible", "paused_manual_recheck_failure_does_not_promise_automatic_retry", "duplicate_confirm_and_cancel_send_one_and_zero_mutations"],
+        "assert": "Progressing headers/body still hit the total deadline and release the worker. History respects the 64 KiB/20-record bounds. Attempts visibly settle; paused manual-read failure never resumes polling or promises retry. Duplicate confirmation dispatches once; Cancel dispatches zero.",
+        "recovery": "The next explicit read may succeed after peer recovery without mutation replay, history rewrite, focus theft or target loss."
+      },
+      {
+        "id": "P4",
+        "probe": "Future 390x844 Chromium fixture: open exact target, tab into confirmation, wait through refresh, cancel, reopen and inspect outcome; repeat paused manual-read failure and Escape. Fictional identities and intercepted mutation POSTs only.",
+        "assert": "document.documentElement.scrollWidth <= innerWidth; dialog has a nonempty accessible name; focus stays safely inside across refresh; visible dialog controls are at least 44px in both dimensions; uncertainty is announced. Cancel attempts zero mutation requests; return focus reaches the row or section heading.",
+        "recovery": "Failed reads retain context and do not steal focus or resume polling. This future browser probe is not a physical-phone test."
+      }
+    ]
+  },
+  "rejected_findings": [
+    {
+      "id": "R1",
+      "claim": "Existing operational controls are missing or have never been field-tested.",
+      "disposition": "Rejected by already-recorded evidence, not by a new execution.",
+      "evidence": "Conversation round_two_brief corrections and the prior actions audit distinguish separately field-proven existing controls from new visual-only captures and unbuilt features."
+    },
+    {
+      "id": "R2",
+      "claim": "An empty current container inventory establishes weak recovery demand.",
+      "disposition": "Rejected; the inventory followed intentional user-requested shutdown/removal.",
+      "evidence": "Conversation round_two_brief corrections and the product Round 2 rebuttal. Neither emptiness nor a healthy current sample erases the recurring operational/storage job."
+    },
+    {
+      "id": "R3",
+      "claim": "The product/PM generic test handoff is the repository's dashboard validation command.",
+      "disposition": "Rejected and corrected after final votes.",
+      "evidence": "Conversation Round 3 handoff_gap/validated_commands; exact dedicated commands appear at .github/workflows/ci.yml:44-49. This correction was command verification, not new feature test execution."
+    }
+  ],
+  "dissent": {
+    "priority": "3-to-1 remains: operator, frontend and product prefer N1 first because existing mutation uncertainty has immediate consequences; operations prefers N2 first because bounded provenance/policy serves recurring disk pressure cheaply without a collection loop.",
+    "disposition": "Preserved, not averaged or resolved. N1 is the majority recommendation; operations' N2-first is a reasonable cheaper alternative for the future operator decision.",
+    "actual_convergence": "All four final responses place N3 third, keep minimal navigation parallel and prefer N5 bounded logs before N4 CPU/RAM. Product's Round 2 logs/metrics uncertainty changed in Round 3; it is not remaining final dissent.",
+    "severity_ballot": "Not recorded / unknown; no severity consensus inferred."
+  },
+  "telemetry": {
+    "scope": "Persona review only; writer/reporting overhead excluded.",
+    "persona_turns": 12,
+    "contexts": 7,
+    "peak_reported_running": 4,
+    "wall_seconds": null,
+    "allocated_lane_seconds": null,
+    "active_agent_seconds": null,
+    "parked_seconds": null,
+    "critical_path_seconds": null,
+    "timed_turns": 0,
+    "missing_turns": 12,
+    "reason": "Reliable start/end and per-turn active-duration accounting was not captured. Lane lifetime is not work time; no estimates, speedup or billing claims."
+  }
+}
