@@ -71,7 +71,8 @@ class ActionTests(unittest.TestCase):
         return [json.loads(line) for line in path.read_text().splitlines()]
 
     def daemon(self):
-        records, reply = [], {"status": 204, "body": b"", "delay": 0}
+        records, reply = [], {"status": 204, "body": b"", "delay": 0,
+                              "inspect": {"status": 200, "state": "exited", "delay": 0}}
 
         class Handler(BaseHTTPRequestHandler):
             protocol_version = "HTTP/1.1"
@@ -80,6 +81,8 @@ class ActionTests(unittest.TestCase):
                 records.append((self.command, self.path,
                                 self.rfile.read(int(self.headers.get("Content-Length", 0)))))
                 response = reply.copy()
+                if reply.get("after_mutation"):
+                    reply["after_mutation"]()
                 time.sleep(response["delay"])
                 try:
                     if response.get("trickle_headers"):
@@ -104,11 +107,41 @@ class ActionTests(unittest.TestCase):
 
             do_DELETE = do_POST
 
+            def do_GET(self):
+                records.append((self.command, self.path, b""))
+                response = reply["inspect"].copy()
+                payload = response.get("body", json.dumps({
+                    "Id": IDENTIFIER, "State": {"Status": response["state"]},
+                    "Config": {"Labels": {}, "Env": ["secret-environment"], "Cmd": ["secret-args"]},
+                }).encode())
+                time.sleep(response["delay"])
+                try:
+                    if response.get("trickle_headers"):
+                        for byte in b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\nConnection: close\r\n\r\n":
+                            self.connection.sendall(bytes([byte]))
+                            time.sleep(response["trickle_headers"])
+                        return
+                    self.send_response(response["status"])
+                    self.send_header("Content-Length", str(len(payload)))
+                    self.send_header("Connection", "close")
+                    self.end_headers()
+                    if response.get("trickle"):
+                        for byte in payload:
+                            self.wfile.write(bytes([byte]))
+                            self.wfile.flush()
+                            time.sleep(response["trickle"])
+                    else:
+                        self.wfile.write(payload)
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # Exact-read deadline tests intentionally close this fake peer.
+
             def log_message(self, *args):
                 pass
 
         path = self.root / "daemon.sock"
-        server = socketserver.UnixStreamServer(str(path), Handler)
+        # Inspect has its own deadline: a deliberately trickling mutation handler
+        # must not serialize the read behind its discarded response body.
+        server = socketserver.ThreadingUnixStreamServer(str(path), Handler)
         thread = threading.Thread(target=server.serve_forever,
                                   kwargs={"poll_interval": 0.01}, daemon=True)
         thread.start()
@@ -158,7 +191,7 @@ class ActionTests(unittest.TestCase):
             dict(self.service, scope=True), dict(self.service, unit="../a.service"),
             dict(self.service, unit="--all.service"), dict(self.service, unit="a\n.service"),
             dict(self.service, unit="worker.timer"), dict(self.service, unit=[]),
-            dict(self.service, action="restart"), dict(self.service, nonce="not accepted here"),
+            dict(self.service, action="unmask"), dict(self.service, nonce="not accepted here"),
             {"kind": "cleanup"}, dict(self.cleanup, action="force"),
             dict(self.cleanup, action=[]), dict(self.cleanup, unit=d.CLEANUP_UNIT),
             dict(self.cleanup, path="/tmp"), dict(self.cleanup, mode="run"),
@@ -177,7 +210,10 @@ class ActionTests(unittest.TestCase):
         self.assertEqual(manifest, {"enabled": True, "nonce": self.controller.nonce,
                                    "owner_uid": os.getuid(),
                                    "protected_services": sorted(d.PROTECTED_SERVICES),
-                                   "capabilities": ["cleanup-job-state", "guarded-cleanup"],
+                                   "capabilities": ["action-history", "cleanup-job-state", "guarded-cleanup",
+                                                    "observed-action-state", "workload-recovery"],
+                                   "container_actions": ["kill", "remove", "restart", "start", "stop"],
+                                   "service_actions": ["restart", "start", "stop"],
                                    "cleanup": {"kind": "cleanup", "action": "run",
                                                "unit": "system-janitor-catchup.service",
                                                "scope": "user", "dispatch_only": True}})
@@ -522,8 +558,13 @@ class ActionTests(unittest.TestCase):
             with self.subTest(engine=engine, action=action, state=state):
                 self.inventory.return_value["items"][0]["State"] = state
                 result = self.controller.execute(dict(self.container, engine=engine, action=action))
-                self.assertEqual(records[-1], (method, f"/containers/{IDENTIFIER}{suffix}", b""))
+                self.assertEqual(records[-2:], [
+                    (method, f"/containers/{IDENTIFIER}{suffix}", b""),
+                    ("GET", f"/containers/{IDENTIFIER}/json", b""),
+                ])
                 self.assertTrue(result["ok"])
+                self.assertEqual(result["observation"]["state"], "exited")
+                self.assertNotIn("secret-", json.dumps(result))
                 self.assertEqual((result["kind"], result["action"]), ("container", action))
                 self.assertRegex(result["completed_at"], r"Z$")
                 json.dumps(result, allow_nan=False)
@@ -560,6 +601,105 @@ class ActionTests(unittest.TestCase):
         self.error(self.container, 503)
         self.assertEqual(records, [])
 
+    def test_recovery_container_fixed_routes_state_guards_and_exact_inspect(self):
+        # Both engines use only full-ID fixed verbs; disappearing capped rows cannot prove state.
+        path, records, reply = self.daemon()
+        for engine in ("docker", "podman"):
+            for action, state, observed, suffix in (
+                ("start", "created", "running", "/start"),
+                ("start", "exited", "running", "/start"),
+                ("start", "stopped", "running", "/start"),
+                ("restart", "running", "running", "/restart?t=10"),
+            ):
+                with self.subTest(engine=engine, action=action, state=state):
+                    self.inventory.return_value = {"items": [{"id": IDENTIFIER, "State": state,
+                                                               "protected": False}]}
+                    reply["inspect"]["state"] = observed
+                    reply["after_mutation"] = lambda: setattr(self.inventory, "return_value", {"items": []})
+                    result = self.controller.execute(dict(self.container, engine=engine, action=action))
+                    self.assertEqual(records[-2:], [
+                        ("POST", f"/containers/{IDENTIFIER}{suffix}", b""),
+                        ("GET", f"/containers/{IDENTIFIER}/json", b""),
+                    ])
+                    self.assertEqual(result["observation"]["state"], observed)
+                    self.assertEqual(result["observation"]["id"], IDENTIFIER)
+                    self.assertEqual(result["observation"]["engine"], engine)
+                    self.assertRegex(result["observation"]["read_at"], r"Z$")
+                    self.assertNotIn("secret-", json.dumps(result))
+                    self.inventory.assert_called_with(path)
+        self.assertEqual((self.inventory.call_count, self.socket.call_count), (8, 8))
+        records.clear()
+        reply.pop("after_mutation")
+        for action, state, protected, status in (
+            ("start", "running", False, 409), ("start", "paused", False, 409),
+            ("start", "restarting", False, 409), ("start", None, False, 409),
+            ("start", [], False, 409), ("restart", "exited", False, 409),
+            ("restart", "created", False, 409), ("restart", "paused", False, 409),
+            ("restart", {}, False, 409), ("start", "exited", True, 403),
+            ("restart", "running", True, 403), ("start", "created", "unknown", 503),
+        ):
+            with self.subTest(action=action, state=state):
+                self.inventory.return_value = {"items": [
+                    {"id": IDENTIFIER, "State": state, "protected": protected}]}
+                self.error(dict(self.container, action=action), status)
+        self.assertEqual(records, [])
+
+    def test_exact_container_read_gaps_and_absence_do_not_rewrite_command_receipts(self):
+        # Exact 404 is absence, not "stopped"; bad UTF/JSON/identity/metadata stays unknown after success.
+        _, records, reply = self.daemon()
+        bad = [
+            b"\xff", b"{bad", ("[" * 1100 + "]" * 1100).encode(),
+            json.dumps({"Id": "b" * 64, "Names": ["same-name"], "State": {"Status": "exited"}}).encode(),
+            json.dumps({"Id": IDENTIFIER[:12], "State": {"Status": "exited"}}).encode(),
+            json.dumps({"Id": IDENTIFIER, "State": "running"}).encode(),
+            json.dumps({"Id": IDENTIFIER, "State": {"Status": "mystery"}}).encode(),
+            json.dumps({"Id": IDENTIFIER, "State": {"Status": "running", "Running": "yes"}}).encode(),
+            json.dumps({"Id": IDENTIFIER, "State": {"Status": "running"}, "Config": {"Labels": []}}).encode(),
+            b"x" * (d.RESPONSE_LIMIT + 1),
+        ]
+        for raw in bad:
+            with self.subTest(size=len(raw)):
+                reply["inspect"].update(status=200, body=raw)
+                result = self.controller.execute(self.container)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["message"], "Container stop completed.")
+                self.assertEqual(result["observation"]["state"], "unknown")
+                self.assertEqual(self.events()[-1]["event"], "succeeded")
+        reply["inspect"].update(status=404, body=b"secret-error")
+        result = self.controller.execute(self.container)
+        self.assertEqual((result["observation"]["status"], result["observation"]["state"]),
+                         ("absent", "absent"))
+        self.assertNotIn("secret-", json.dumps(result))
+        reply.update(status=409)
+        error = self.error(self.container, 409)
+        self.assertEqual(error.details["observation"]["state"], "absent")
+        self.assertEqual(error.details["action_id"], self.events()[-1]["action_id"])
+        self.assertEqual(len(records), 24)
+        self.assertEqual(sum(method != "GET" for method, _, _ in records), 12)
+
+    def test_exact_container_read_has_independent_total_deadline(self):
+        # Progressing headers/body cannot renew the two-second total read budget or invent command failure.
+        _, records, reply = self.daemon()
+        original_json = d._json
+        for mode in ("headers", "body", "parse"):
+            def parse(raw):
+                if mode == "parse":
+                    time.sleep(0.08)  # Even already-buffered JSON consumes the same total deadline.
+                return original_json(raw)
+            with self.subTest(mode=mode), mock.patch.object(d, "UNIT_STATE_TIMEOUT", 0.05), \
+                    mock.patch.object(d, "_json", side_effect=parse):
+                reply["inspect"].update(trickle_headers=0.025 if mode == "headers" else 0,
+                                        trickle=0.025 if mode == "body" else 0)
+                started = time.monotonic()
+                result = self.controller.execute(self.container)
+                self.assertLess(time.monotonic() - started, 0.25)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["observation"]["state"], "unknown")
+                self.assertIn("deadline", result["observation"]["detail"])
+                self.assertEqual(self.events()[-1]["event"], "succeeded")
+        self.assertEqual(len(records), 6)
+        self.assertEqual(sum(method != "GET" for method, _, _ in records), 3)
+
     def test_daemon_errors_limits_and_unknown_timeout(self):
         # Distinguish explicit daemon rejection from an unobserved dispatched result.
         _, records, reply = self.daemon()
@@ -573,7 +713,9 @@ class ActionTests(unittest.TestCase):
         reply.update(status=204, body=b"", delay=0.1)
         with mock.patch.object(d, "HTTP_TIMEOUT", 0.03):
             self.error(self.container, 504, "unknown")
-        self.assertEqual(len(records), 5)
+        self.assertEqual(len(records), 10)
+        self.assertEqual(sum(method != "GET" for method, _, _ in records), 5)
+        self.assertEqual(sum(method == "GET" for method, _, _ in records), 5)
         self.assertEqual(self.events()[-1]["event"], "unknown")
         self.assertEqual(self.wake.call_count, 5)
         self.assertNotIn("secret-daemon-detail", json.dumps(self.events()))
@@ -657,31 +799,333 @@ class ActionTests(unittest.TestCase):
 
     def test_user_service_fixed_command_fresh_guards_and_safe_errors(self):
         # Ordinary smith workers remain stoppable; no arbitrary command stderr escapes.
-        with mock.patch.object(d.subprocess, "run",
-                               return_value=SimpleNamespace(returncode=0)) as run:
+        code, failure = 0, None
+        def systemctl(args, **kwargs):
+            if args[2] == "show":
+                return unit_response(Id=UNIT, ActiveState="active")
+            if failure:
+                raise failure
+            return SimpleNamespace(returncode=code, stderr="secret-service-detail")
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
             self.controller.execute(self.service)
-            run.assert_called_once_with(
+            self.assertEqual([call.args[0][2] for call in run.call_args_list], ["show", "stop", "show"])
+            self.assertEqual(run.call_args_list[1], mock.call(
                 ["systemctl", "--user", "stop", "--", UNIT], stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False,
                 timeout=12, check=False,
-            )
+            ))
             for unit in d.PROTECTED_SERVICES:
                 self.error(dict(self.service, unit=unit), 403)
             self.services.return_value = {"items": []}
             self.error(self.service, 404)
             self.services.return_value = {"items": [{"unit": UNIT, "scope": "system"}]}
             self.error(self.service, 403)
-            self.assertEqual(run.call_count, 1)
+            self.assertEqual(run.call_count, 3)
             self.services.return_value = {"items": [{"unit": UNIT, "scope": "user"}]}
-            run.return_value = SimpleNamespace(returncode=7, stderr="secret-service-detail")
+            code = 7
             error = self.error(self.service, 502)
             self.assertIn("rc=7", str(error))
             self.assertIn(UNIT, str(error))
             self.assertNotIn("secret-service-detail", str(error))
-            run.side_effect = subprocess.TimeoutExpired("systemctl", 12, stderr="secret-timeout")
+            failure = subprocess.TimeoutExpired("systemctl", 12, stderr="secret-timeout")
             self.error(self.service, 504, "unknown")
+            self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                             ["show", "stop", "show"] * 3)
         self.assertEqual(self.events()[-1]["event"], "unknown")
         self.assertNotIn("secret-", json.dumps(self.events()))
+
+    def test_recovery_service_signal_exit_preserves_unknown_and_exact_post_read(self):
+        # A signalled helper may already have sent the user-manager request; never call it rejected.
+        for number in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signal=number):
+                def systemctl(args, **kwargs):
+                    if args[2] == "show":
+                        return unit_response(Id=UNIT, ActiveState="inactive")
+                    self.assertEqual(args, ["systemctl", "--user", "stop", "--", UNIT])
+                    return SimpleNamespace(returncode=-number)
+                with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+                    error = self.error(self.service, 502, "unknown")
+                self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                                 ["show", "stop", "show"])
+                self.assertEqual(error.details["observation"]["state"], "inactive")
+                self.assertRegex(error.details["observation"]["read_at"], r"Z$")
+                self.assertEqual(self.events()[-1]["event"], "unknown")
+                self.assertNotIn("rejected", json.dumps(self.events()))
+
+    def test_recovery_service_retained_identity_and_per_verb_start_policy(self):
+        # A stopped service can leave the capped list; exact manager state, not list absence, gates recovery.
+        can_start, active = False, "active"
+        def systemctl(args, **kwargs):
+            nonlocal active
+            if args[2] == "show":
+                return unit_response(Id=UNIT, CanStart="yes" if can_start else "no",
+                                     ActiveState=active, SubState="running" if active == "active" else "dead")
+            self.assertEqual(args[:2], ["systemctl", "--user"])
+            self.assertEqual(args[-2:], ["--", UNIT])
+            self.assertEqual(kwargs["timeout"], 12)
+            self.assertFalse(kwargs["shell"])
+            active = "inactive" if args[2] == "stop" else "active"
+            return SimpleNamespace(returncode=0)
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+            stopped = self.controller.execute(self.service)
+            self.assertEqual(stopped["observation"]["state"], "inactive")
+            self.assertFalse(stopped["observation"]["can_start"])
+            self.error(dict(self.service, action="start"), 409)
+            self.error(dict(self.service, action="restart"), 409)
+            can_start = True
+            self.services.return_value = {"items": [], "truncated": True}
+            started = self.controller.execute(dict(self.service, action="start"))
+            restarted = self.controller.execute(dict(self.service, action="restart"))
+        self.assertEqual(started["observation"]["state"], "active")
+        self.assertEqual(restarted["observation"]["state"], "active")
+        self.assertEqual([call.args[0][2] for call in run.call_args_list if call.args[0][2] != "show"],
+                         ["stop", "start", "restart"])
+        self.assertEqual(self.services.call_count, 5)
+
+    def test_recovery_service_post_read_gap_is_not_command_failure(self):
+        # A successful command and a failed exact observation are independent facts, including decoder failures.
+        reads = 0
+        def systemctl(args, **kwargs):
+            nonlocal reads
+            if args[2] == "show":
+                reads += 1
+                if reads == 2:
+                    raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "fixture decode")
+                return unit_response(Id=UNIT, ActiveState="active")
+            return SimpleNamespace(returncode=0)
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+            result = self.controller.execute(self.service)
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["message"], f"User service {UNIT} stop completed.")
+        self.assertEqual(result["observation"]["state"], "unknown")
+        self.assertEqual(result["observation"]["error"], "malformed")
+        self.assertEqual([call.args[0][2] for call in run.call_args_list], ["show", "stop", "show"])
+        self.assertEqual(self.events()[-1]["event"], "succeeded")
+
+    def test_recovery_services_refuse_protected_canonical_aliases_and_malformed_scope(self):
+        # Manual-stop usability differs from Start, but aliases and missing/unknown user scope never grant authority.
+        for action in ("stop", "start", "restart"):
+            request = dict(self.service, action=action)
+            for canonical in d.PROTECTED_SERVICES:
+                with self.subTest(action=action, canonical=canonical), mock.patch.object(
+                        d.subprocess, "run", return_value=unit_response(Id=canonical)) as run:
+                    self.error(request, 403)
+                    self.assertEqual([call.args[0][2] for call in run.call_args_list], ["show"])
+            for changes, status in (
+                ({"Id": "unprotected-alias.service"}, 503),
+                ({"Id": UNIT, "LoadState": "masked"}, 503),
+                ({"Id": UNIT, "LoadState": "not-found", "Result": ""}, 404),
+                ({"Id": UNIT, "ExecMainStatus": "NaN"}, 503),
+                ({"Id": UNIT, "ActiveState": "maintenance"}, 503),
+            ):
+                with self.subTest(action=action, changes=changes), mock.patch.object(
+                        d.subprocess, "run", return_value=unit_response(**changes)) as run:
+                    self.error(request, status)
+                    self.assertEqual([call.args[0][2] for call in run.call_args_list], ["show"])
+            with mock.patch.object(d.subprocess, "run") as run:
+                for scope in ("system", None, True, [], {}):
+                    self.services.return_value = {"items": [{"unit": UNIT, "scope": scope}]}
+                    self.error(request, 403)
+                self.services.return_value = {"items": [{"unit": UNIT}]}
+                self.error(request, 403)
+                self.services.return_value = {"items": [{"unit": UNIT, "scope": "user"}] * 2}
+                self.error(request, 403)
+                for invalid in (None, [], {"items": None}, {"items": [{}], "status": "unknown"}):
+                    self.services.return_value = invalid
+                    self.error(request, 503)
+                run.assert_not_called()
+            self.services.return_value = {"items": [{"unit": UNIT, "scope": "user"}]}
+        for refused in ("yes", "no"):
+            def systemctl(args, **kwargs):
+                return (unit_response(Id=UNIT, CanStart="no", RefuseManualStart=refused)
+                        if args[2] == "show" else SimpleNamespace(returncode=0))
+            with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+                self.assertTrue(self.controller.execute(self.service)["ok"])
+                self.error(dict(self.service, action="start"), 409)
+                self.error(dict(self.service, action="restart"), 409)
+                self.assertEqual(sum(call.args[0][2] == "stop" for call in run.call_args_list), 1)
+
+    def test_exact_process_observation_never_resignals_replacement_or_invents_exit(self):
+        # The post-read keeps the original PID/start pair, even when that PID is already reused or unreadable.
+        child = self.child()
+        identity = d.process_identity(child.pid)
+        request = {"kind": "process", "pid": child.pid, "action": "kill",
+                   "start_time_ticks": identity["start_time_ticks"]}
+        for after, state in (
+            (identity, "present"),
+            (dict(identity, start_time_ticks=identity["start_time_ticks"] + 1), "replaced"),
+            (d.ActionError(404, "gone"), "missing"),
+            (d.ActionError(503, "secret-read"), "unknown"),
+            (dict(identity, start_time_ticks=True), "unknown"),
+        ):
+            with self.subTest(state=state), mock.patch.object(d, "process_identity",
+                    side_effect=[identity, after]) as read, \
+                    mock.patch.object(d, "protected_process", return_value=False), \
+                    mock.patch.object(d.signal, "pidfd_send_signal") as send:
+                result = self.controller.execute(request)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["observation"]["state"], state)
+                self.assertEqual(result["observation"]["pid"], child.pid)
+                self.assertEqual(result["observation"]["start_time_ticks"], identity["start_time_ticks"])
+                self.assertRegex(result["observation"]["read_at"], r"Z$")
+                self.assertEqual(read.call_count, 2)
+                send.assert_called_once()
+                self.assertIsNone(child.poll())  # Signaling itself is intercepted for every replacement case.
+                self.assertNotIn("secret-", json.dumps(result))
+
+    def test_history_actual_cleanup_receipts_are_private_curated_and_read_only(self):
+        # Only real journal IDs/accepted/observed semantics are exposed; the GET reader never writes or locks.
+        def systemctl(args, **kwargs):
+            unit = args[-1]
+            return unit_response(Id=unit) if args[2] == "show" else SimpleNamespace(returncode=0)
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl):
+            stopped = self.controller.execute(self.service)
+            accepted = self.controller.execute(self.cleanup)
+        with mock.patch.object(d.subprocess, "run", return_value=unit_response(
+                ActiveState="active", SubState="running")):
+            observed = self.controller.execute(self.cleanup)
+        path = self.controller.state_dir / d.AUDIT_NAME
+        original = path.read_bytes()
+        events = self.events()
+        events[-1]["token"] = "secret-token"
+        events[-1]["nonce"] = "secret-nonce"
+        events[-1]["target"]["args"] = ["secret-args"]
+        events[-1]["observation"]["env"] = ["secret-env"]
+        path.write_text("".join(json.dumps(event) + "\n" for event in events))
+        before, info = path.read_bytes(), path.stat()
+        with mock.patch.object(Path, "mkdir") as mkdir, \
+                mock.patch.object(d.os, "write") as write, mock.patch.object(d.os, "replace") as replace, \
+                mock.patch.object(d.fcntl, "flock") as flock:
+            self.controller._lock.acquire()
+            try:
+                history = self.controller.history()
+            finally:
+                self.controller._lock.release()
+            mkdir.assert_not_called()
+            write.assert_not_called()
+            replace.assert_not_called()
+            flock.assert_not_called()
+        self.assertEqual(history["status"], "available")
+        self.assertEqual(len(history["events"]), 6)
+        self.assertEqual({event["action_id"] for event in history["events"]},
+                         {stopped["action_id"], accepted["action_id"], observed["action_id"]})
+        self.assertEqual([event["event"] for event in history["events"]],
+                         ["started", "succeeded", "started", "accepted", "started", "observed"])
+        self.assertIs(history["events"][3]["dispatch_only"], True)
+        self.assertNotIn("secret-", json.dumps(history))
+        self.assertIn("does not mean cleanup completed.", history["events"][3]["message"])
+        self.assertEqual(path.read_bytes(), before)
+        self.assertEqual((path.stat().st_mtime_ns, path.stat().st_mode), (info.st_mtime_ns, info.st_mode))
+        self.assertTrue(original)
+
+    def test_history_boundaries_invalid_numeric_utf_json_and_incomplete_tail_are_visible(self):
+        # Bounded tails cannot turn torn/invalid records into a healthy empty history or publish arbitrary extras.
+        state = self.controller.state_dir
+        state.mkdir(mode=0o700)
+        path = state / d.AUDIT_NAME
+        path.touch(mode=0o600)
+        def event(n):
+            return {"action_id": f"{n:032x}", "kind": "service", "action": "stop", "event": "started",
+                    "time": "2026-11-05T00:00:00Z", "target": {"scope": "user", "unit": UNIT},
+                    "message": "x" * 600, "extra": "secret-extra"}
+        rows = [event(n) for n in range(30)]
+        raw = b"x" * (d.HISTORY_BYTES + 100) + b"\n" + "".join(
+            json.dumps(value) + "\n" for value in rows).encode()
+        path.write_bytes(raw)
+        real_read = os.read
+        with mock.patch.object(d.os, "read", wraps=real_read) as read:
+            history = self.controller.history()
+        self.assertEqual(read.call_count, 1)
+        self.assertLessEqual(read.call_args.args[1], 64 * 1024)
+        self.assertEqual(len(history["events"]), 20)
+        self.assertEqual([item["action_id"] for item in history["events"]], [f"{n:032x}" for n in range(10, 30)])
+        self.assertTrue(history["truncated"])
+        self.assertTrue(history["quality"]["tail_truncated"])
+        self.assertTrue(history["quality"]["events_truncated"])
+        self.assertTrue(history["quality"]["incomplete_first_line"])
+        self.assertEqual(history["quality"]["invalid_lines"], 0)
+        self.assertEqual(len(history["events"][-1]["message"]), 512)
+        self.assertNotIn("secret-", json.dumps(history))
+        invalid = [
+            dict(event(40), status=True), dict(event(41), status="200"),
+            dict(event(42), target={"scope": "system", "unit": UNIT}),
+            dict(event(43), kind="process", action="kill", target={"pid": True, "start_time_ticks": 1}),
+            dict(event(44), observation={"status": "available", "scope": "user", "unit": UNIT,
+                 "read_at": "2026-11-05T00:00:00Z", "state": "inactive", "exit_status": True}),
+            {"action_id": "c" * 32, "kind": "cleanup", "action": "run", "event": "succeeded",
+             "time": "2026-11-05T00:00:00Z", "target": {"scope": "user", "unit": d.CLEANUP_UNIT}},
+        ]
+        path.write_bytes((json.dumps(event(0)) + "\n" + "".join(json.dumps(value) + "\n"
+                         for value in invalid)).encode() + b"\xff\n{bad}\n" +
+                         ("[" * 1100 + "]" * 1100 + "\n").encode() +
+                         json.dumps(event(99)).encode())  # Valid JSON without newline is still incomplete.
+        history = self.controller.history()
+        self.assertEqual(history["status"], "partial")
+        self.assertEqual(history["quality"]["invalid_lines"], len(invalid) + 3)
+        self.assertTrue(history["quality"]["incomplete_tail"])
+        self.assertEqual([item["action_id"] for item in history["events"]], ["0" * 32])
+        self.assertNotIn("secret-", json.dumps(history))
+        # One byte past the tail bound must be reported, not read or quietly accepted as complete.
+        value = event(1)
+        value["padding"] = ""
+        encoded = (json.dumps(value) + "\n").encode()
+        value["padding"] = "x" * (d.HISTORY_BYTES - len(encoded))
+        raw = (json.dumps(value) + "\n").encode()
+        self.assertEqual(len(raw), d.HISTORY_BYTES)
+        path.write_bytes(raw)
+        self.assertFalse(self.controller.history()["quality"]["tail_truncated"])
+        path.write_bytes(raw[:-1] + b" \n")
+        history = self.controller.history()
+        self.assertTrue(history["quality"]["tail_truncated"])
+        self.assertEqual(history["status"], "partial")
+
+    def test_history_missing_unavailable_and_started_only_remain_distinct(self):
+        # A reader neither creates first-run state nor treats unsafe files or lost terminal audits as healthy history.
+        with mock.patch.object(Path, "mkdir") as mkdir, mock.patch.object(d.fcntl, "flock") as flock:
+            history = self.controller.history()
+            self.assertEqual(history["status"], "no_history_yet")
+            self.assertFalse(self.controller.state_dir.exists())
+            mkdir.assert_not_called()
+            flock.assert_not_called()
+        sentinel = self.root / "history-sentinel"
+        sentinel.write_text("secret-sentinel")
+        for case in ("symlink", "mode", "hardlink", "fifo", "directory"):
+            state = self.root / f"history-{case}"
+            state.mkdir(mode=0o700)
+            path = state / d.AUDIT_NAME
+            if case == "symlink":
+                path.symlink_to(sentinel)
+            elif case == "hardlink":
+                os.link(sentinel, path)
+            elif case == "fifo":
+                os.mkfifo(path, 0o600)
+            else:
+                path.touch(mode=0o600)
+            if case == "mode":
+                path.chmod(0o644)
+            if case == "directory":
+                state.chmod(0o777)
+            with self.subTest(case=case):
+                history = self.controller_at(state).history()
+                self.assertEqual(history["status"], "unavailable")
+                self.assertEqual(history["events"], [])
+                self.assertNotIn("secret-", json.dumps(history))
+        self.assertEqual(sentinel.read_text(), "secret-sentinel")
+        real_write, writes = os.write, 0
+        def fail_terminal(fd, data):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError(errno.ENOSPC, "full")
+            return real_write(fd, data)
+        def systemctl(args, **kwargs):
+            return unit_response(Id=UNIT) if args[2] == "show" else SimpleNamespace(returncode=0)
+        with mock.patch.object(d.os, "write", side_effect=fail_terminal), \
+                mock.patch.object(d.subprocess, "run", side_effect=systemctl):
+            error = self.error(self.service, 500, "unknown")
+        history = self.controller.history()
+        self.assertEqual([event["event"] for event in history["events"]], ["started"])
+        self.assertEqual(history["events"][0]["action_id"], error.details["action_id"])
 
     def test_container_transport_has_total_deadline_not_inactivity_timeout(self):
         # A progressing daemon must not hold the global action lock indefinitely.
@@ -696,9 +1140,14 @@ class ActionTests(unittest.TestCase):
                 started = time.monotonic()
                 self.error(self.container, status, "unknown")
                 self.assertLess(time.monotonic() - started, 0.25)
-                with mock.patch.object(d.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+                def systemctl(args, **kwargs):
+                    return unit_response(Id=UNIT) if args[2] == "show" else SimpleNamespace(returncode=0)
+                with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
                     self.assertTrue(self.controller.execute(self.service)["ok"])
-        self.assertEqual(len(records), 2)
+                    self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                                     ["show", "stop", "show"])
+        self.assertEqual(len(records), 4)
+        self.assertEqual(sum(method != "GET" for method, _, _ in records), 2)
 
     def test_audit_is_private_and_started_precedes_dispatch(self):
         # A durable, sanitized intent must exist before the first side effect.
@@ -709,7 +1158,7 @@ class ActionTests(unittest.TestCase):
             path = self.controller.state_dir / d.AUDIT_NAME
             self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
             self.assertEqual(path.stat().st_uid, os.getuid())
-            return SimpleNamespace(returncode=0)
+            return unit_response(Id=UNIT) if args[2] == "show" else SimpleNamespace(returncode=0)
 
         with mock.patch.object(d.subprocess, "run", side_effect=dispatch):
             result = self.controller.execute(self.service)
@@ -773,15 +1222,16 @@ class ActionTests(unittest.TestCase):
                 raise OSError(errno.ENOSPC, "full")
             return real_write(fd, data)
 
-        with mock.patch.object(d.subprocess, "run",
-                               return_value=SimpleNamespace(returncode=0)) as run, \
+        def systemctl(args, **kwargs):
+            return unit_response(Id=UNIT) if args[2] == "show" else SimpleNamespace(returncode=0)
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run, \
                 mock.patch.object(d.os, "write", side_effect=fail_outcome):
             self.error(self.service, 500, "unknown")
-            run.assert_called_once()
+            self.assertEqual([call.args[0][2] for call in run.call_args_list], ["show", "stop", "show"])
         self.assertEqual([event["event"] for event in self.events()], ["started"])
         self.wake.assert_called_once_with()
         self.wake.side_effect = RuntimeError("secret-refresh-detail")
-        with mock.patch.object(d.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl):
             error = self.error(self.service, 500, "unknown")
         self.assertNotIn("secret-refresh-detail", str(error))
         self.assertEqual(self.events()[-1]["event"], "unknown")
@@ -793,15 +1243,17 @@ class ActionTests(unittest.TestCase):
         def dispatch(args, **kwargs):
             self.error(self.service, 409)
             self.error(self.service, 409, controller=other)
-            return SimpleNamespace(returncode=0)
+            return unit_response(Id=UNIT) if args[2] == "show" else SimpleNamespace(returncode=0)
 
         with mock.patch.object(d.subprocess, "run", side_effect=dispatch) as run:
             self.controller.execute(self.service)
-            run.assert_called_once()
+            self.assertEqual([call.args[0][2] for call in run.call_args_list], ["show", "stop", "show"])
         self.assertEqual(len(self.events()), 2)
         self.wake.assert_called_once_with()
         with mock.patch.object(d, "AUDIT_LIMIT", 1024), \
-                mock.patch.object(d.subprocess, "run", return_value=SimpleNamespace(returncode=0)):
+                mock.patch.object(d.subprocess, "run", side_effect=lambda args, **kwargs:
+                                  unit_response(Id=UNIT) if args[2] == "show" else
+                                  SimpleNamespace(returncode=0)):
             for _ in range(25):
                 self.controller.execute(self.service)
         paths = list(self.controller.state_dir.iterdir())

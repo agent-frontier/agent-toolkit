@@ -88,6 +88,56 @@ function maintenanceFixture() {
   };
 }
 
+function recoveryFixture() {
+  const value = maintenanceFixture();
+  Object.assign(value.actions, {
+    capabilities: ["action-history", "cleanup-job-state", "guarded-cleanup", "observed-action-state", "workload-recovery"],
+    container_actions: ["kill", "remove", "restart", "start", "stop"],
+    service_actions: ["restart", "start", "stop"],
+  });
+  value.user_services = {items: [{unit: "fixture-worker.service", scope: "user", active: "active",
+    sub: "running", description: "owned fixture"}]};
+  value.podman = {status: "available", items: [{id: "a".repeat(64), ID: "a".repeat(12),
+    Names: "owned-container", engine: "podman", Image: "local-fixture", State: "created", protected: false}]};
+  return value;
+}
+
+function recoveryServiceState(active, changes = {}) {
+  return {...maintenanceFixture().janitor.service, unit: "fixture-worker.service", id: "fixture-worker.service",
+    state: active, active, sub: active === "active" ? "running" : "dead", protected: false, ...changes};
+}
+
+function actionHistoryFixture(events = [], changes = {}) {
+  return {events, status: "available", truncated: false, read_at: new Date().toISOString(),
+    detail: "Actual current-file receipts only.", quality: {
+      tail_truncated: false, events_truncated: false, invalid_lines: 0, incomplete_first_line: false,
+      incomplete_tail: false, changed_during_read: false,
+    }, ...changes};
+}
+
+function actionHistoryView(nodes) {
+  return {events: nodes.get("recent-actions").children.map(node => node.textContent),
+    quality: nodes.get("actions-quality").textContent};
+}
+
+async function historyApplication() {
+  const app = application();
+  app.pending.shift()(snapshotResponse(recoveryFixture()));
+  await new Promise(resolve => setImmediate(resolve));
+  const started = {action_id: "a".repeat(32), kind: "service", action: "stop", event: "started",
+    time: new Date().toISOString(), target: {scope: "user", unit: "fixture-worker.service"}};
+  const history = actionHistoryFixture([started]);
+  app.pending.shift()(snapshotResponse(history));
+  await new Promise(resolve => setImmediate(resolve));
+  return {...app, started, history};
+}
+
+function automaticSnapshot(app) {
+  assert.equal(app.timers.size, 1);
+  app.timers.values().next().value(); // Actual refresh() timer, not the manual refresh(true) path.
+  assert.equal(app.fetchCalls.at(-1).url, "/api/snapshot");
+}
+
 test("opening the plain URL requests data without a token or a terminal command", () => {
   const { requests } = application();
   assert.deepEqual(requests, ["/api/snapshot"]);
@@ -525,4 +575,326 @@ test("transport and JSON delay consume freshness instead of dating old data at r
   assert.equal(vm.runInContext("cleanupAllowed()", context), false);
   assert.equal(nodes.get("cleanup-run").disabled, true);
   assert.equal(nodes.get("connection").textContent, "Stale data");
+});
+
+test("advertised recovery choices keep legacy backends safe and disclose exact-ID restart grace", () => {
+  // New verbs require real lists/capabilities; old assets/backends keep only their original fixed choices.
+  const {nodes, context, requests} = application();
+  context.recovery = recoveryFixture();
+  vm.runInContext("render(recovery, receiptFixture()); showDetails('Container',recovery.podman.items[0]);", context);
+  assert.deepEqual(nodes.get("action-controls").children.map(button => button.textContent), ["Start container", "Remove container"]);
+  nodes.get("action-controls").children[0].events.click();
+  assert.match(nodes.get("action-question").textContent, new RegExp(`podman, ${"a".repeat(64)}`));
+  assert.equal(requests.filter(url => url === "/api/action").length, 0);
+  for (const engine of ["docker", "podman"]) {
+    context.recovery.podman.items[0].engine = engine;
+    context.recovery.podman.items[0].State = "running";
+    vm.runInContext("showDetails('Container',recovery.podman.items[0]);", context);
+    nodes.get("action-controls").children.find(button => button.textContent === "Restart container").events.click();
+    assert.match(nodes.get("action-question").textContent, /Restart disrupts.*10 seconds.*force-kill/);
+  }
+  for (const state of ["paused", "restarting", "unknown"]) {
+    context.recovery.podman.items[0].State = state;
+    vm.runInContext("showDetails('Container',recovery.podman.items[0]);", context);
+    assert.equal(nodes.get("action-controls").children.some(button => button.textContent === "Restart container"), false);
+  }
+  delete context.recovery.actions.container_actions;
+  delete context.recovery.actions.service_actions;
+  context.recovery.podman.items[0].State = "created";
+  vm.runInContext("render(recovery, receiptFixture()); showDetails('Container',recovery.podman.items[0]); refreshActionHistory(); confirmAction('start','Start container'); runAction();", context);
+  assert.deepEqual(nodes.get("action-controls").children.map(button => button.textContent), ["Remove container"]);
+  assert.equal(requests.filter(url => url === "/api/actions").length, 0);
+  assert.equal(requests.filter(url => url === "/api/action").length, 0);
+  vm.runInContext("showDetails('Service',recovery.user_services.items[0]);", context);
+  assert.deepEqual(nodes.get("action-controls").children.map(button => button.textContent), ["Stop service"]);
+});
+
+test("a recovery confirmation cannot post a verb removed by downgraded metadata", () => {
+  // A once-visible button is not authority after a new snapshot removes its advertised action list.
+  const {nodes, context, requests} = application();
+  context.recovery = recoveryFixture();
+  vm.runInContext("render(recovery, receiptFixture()); showDetails('Container',recovery.podman.items[0]);", context);
+  nodes.get("action-controls").children.find(button => button.textContent === "Start container").events.click();
+  delete context.recovery.actions.container_actions;
+  vm.runInContext("render(recovery, receiptFixture());", context);
+  nodes.get("action-run").events.click();
+  assert.equal(requests.filter(url => url === "/api/action").length, 0);
+  assert.match(nodes.get("action-result").textContent, /no unsupported request sent/);
+});
+
+test("retained service dialog survives row GC for Stop -> Start -> Restart -> Stop", async () => {
+  // Use actual listeners and returned exact observations; inventory disappearance is never evidence of stopping.
+  const {nodes, context, pending, fetchCalls, requests} = application();
+  context.recovery = recoveryFixture();
+  vm.runInContext("render(recovery, receiptFixture()); showDetails('Service',recovery.user_services.items[0]);", context);
+  for (const [index, verb, label, state] of [
+    [1, "stop", "Stop service", "inactive"], [2, "start", "Start service", "active"],
+    [3, "restart", "Restart service", "active"], [4, "stop", "Stop service", "inactive"],
+  ]) {
+    nodes.get("action-controls").children.find(button => button.textContent === label).events.click();
+    nodes.get("action-run").events.click();
+    nodes.get("action-run").events.click();
+    const posted = fetchCalls.filter(call => call.url === "/api/action").at(-1);
+    assert.deepEqual(JSON.parse(posted.options.body),
+      {kind: "service", scope: "user", unit: "fixture-worker.service", action: verb});
+    pending.at(-1)({ok: true, status: 200, json: async () => ({
+      ok: true, action_id: String(index).repeat(32), message: `User service ${verb} completed.`,
+      observation: recoveryServiceState(state),
+    })});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(nodes.get("action-result").textContent, /Request receipt.*Exact target observation:/);
+    assert.match(nodes.get("action-result").textContent, new RegExp(`observation: ${state}; server read`));
+    assert.equal(nodes.get("action-controls").hidden, false);
+    if (index === 1) {
+      assert.equal(context.recovery.user_services.items[0].active, "active");
+      context.recovery.user_services = {items: [], truncated: true};
+      vm.runInContext("render(recovery, receiptFixture());", context);
+      assert.equal(nodes.get("services").children[0].children[0].textContent, "No matching observed services");
+      assert.equal(nodes.get("action-controls").children.some(button => button.textContent === "Start service"), true);
+    }
+  }
+  assert.equal(requests.filter(url => url === "/api/action").length, 4);
+  assert.equal(nodes.get("action-controls").children.some(button => button.textContent === "Start service"), true);
+});
+
+test("a successful receipt with unknown observation grants no unsafe controls or invented app health", async () => {
+  // Read uncertainty is not command failure and cannot turn an old running row into recovery authority.
+  const {nodes, context, pending, requests} = application();
+  context.recovery = recoveryFixture();
+  context.recovery.podman.items[0].State = "running";
+  vm.runInContext("render(recovery, receiptFixture()); showDetails('Container',recovery.podman.items[0]);", context);
+  nodes.get("action-controls").children.find(button => button.textContent === "Stop gracefully").events.click();
+  nodes.get("action-run").events.click();
+  pending[1]({ok: true, status: 200, json: async () => ({
+    ok: true, action_id: "d".repeat(32), message: "Container stop completed.",
+    observation: {id: "a".repeat(64), engine: "podman", state: "unknown", status: "unknown",
+      read_at: new Date().toISOString(), detail: "Exact read malformed; receipt unchanged."},
+  })});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(nodes.get("action-result").textContent, /Request receipt.*Container stop completed.*observation: unknown/);
+  assert.doesNotMatch(nodes.get("action-result").textContent, /Action failed|healthy/);
+  assert.equal(nodes.get("action-controls").hidden, true);
+  nodes.get("action-run").events.click();
+  assert.equal(requests.filter(url => url === "/api/action").length, 1);
+});
+
+test("lost response or action ID remains an UNLINKED browser attempt even beside same-target history", async () => {
+  // No action ID means no association by name/time; later history, reopening and refresh cannot replay a mutation.
+  for (const lost of ["response", "id"]) {
+    const {nodes, context, pending, requests} = application();
+    context.recovery = recoveryFixture();
+    vm.runInContext("render(recovery, receiptFixture()); showDetails('Service',recovery.user_services.items[0]);", context);
+    nodes.get("action-controls").children.find(button => button.textContent === "Stop service").events.click();
+    nodes.get("action-run").events.click();
+    pending[1]({ok: true, status: 200, json: async () => {
+      if (lost === "response") throw new Error("Response lost");
+      return {ok: true, message: "Stop receipt body without ID.", observation: recoveryServiceState("inactive")};
+    }});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(nodes.get("action-result").textContent, /UNLINKED browser attempt.*no action ID/);
+    const events = [{action_id: "b".repeat(32), kind: "service", action: "stop", event: "started",
+      time: new Date().toISOString(), target: {scope: "user", unit: "fixture-worker.service"}}];
+    pending[2](snapshotResponse(actionHistoryFixture(events)));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(nodes.get("unlinked-attempt").textContent, /Not attached to history by target or time/);
+    assert.doesNotMatch(nodes.get("unlinked-attempt").textContent, /bbbbbbbb/);
+    assert.match(nodes.get("recent-actions").children[0].textContent, /bbbbbbbb.*unresolved/);
+    vm.runInContext("render(recovery, receiptFixture()); showDetails('Service',recovery.user_services.items[0]); runAction(); refreshActionHistory();", context);
+    assert.equal(requests.filter(url => url === "/api/action").length, 1);
+  }
+});
+
+test("recent activity uses actual IDs, preserves started-only/C1 dispatch semantics and exposes quality", async () => {
+  // Same target/time but different actual IDs never resolves a started-only record or claims cleanup completed.
+  const {nodes, context, pending, requests} = application();
+  context.recovery = recoveryFixture();
+  const time = new Date().toISOString(), target = {scope: "user", unit: "fixture-worker.service"};
+  const events = [
+    {action_id: "a".repeat(32), kind: "service", action: "restart", event: "started", time, target},
+    {action_id: "d".repeat(32), kind: "service", action: "restart", event: "failed", time, target},
+    {action_id: "b".repeat(32), kind: "cleanup", action: "run", event: "accepted", time},
+    {action_id: "c".repeat(32), kind: "cleanup", action: "run", event: "observed", time, nonce: "secret-extra"},
+  ];
+  vm.runInContext("render(recovery, receiptFixture()); refreshActionHistory(); refreshActionHistory();", context);
+  assert.equal(requests.filter(url => url === "/api/actions").length, 1);
+  pending[1](snapshotResponse(actionHistoryFixture(events, {status: "partial", truncated: true, quality: {
+    tail_truncated: true, events_truncated: true, invalid_lines: 2, incomplete_first_line: true,
+    incomplete_tail: true, changed_during_read: false,
+  }})));
+  await new Promise(resolve => setImmediate(resolve));
+  const lines = nodes.get("recent-actions").children.map(node => node.textContent);
+  assert.match(lines[0], /aaaaaaaa.*started; unresolved/);
+  assert.match(lines[2], /accepted scheduling only, not cleanup completion/);
+  assert.match(lines[3], /existing runner observed; no duplicate scheduled/);
+  assert.doesNotMatch(lines.join(" "), /secret-extra/);
+  assert.match(nodes.get("actions-quality").textContent, /partial.*invalid lines: 2.*incomplete tail: true/);
+  vm.runInContext("refreshActionHistory();", context);
+  pending[2](snapshotResponse(actionHistoryFixture([], {status: "no_history_yet"})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(nodes.get("recent-actions").children[0].textContent, /NoHistoryYet/);
+  vm.runInContext("refreshActionHistory();", context);
+  pending[3](snapshotResponse(actionHistoryFixture([], {quality: {invalid_lines: "not numeric"}})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(nodes.get("actions-quality").textContent, /Unavailable.*Malformed history response.*no replay/);
+  assert.equal(requests.filter(url => url === "/api/action").length, 0);
+});
+
+test("per-verb service UI does not confuse CanStart false with protected or unavailable Stop", () => {
+  // A readable loaded user unit can be stopped despite manual-start policy; protected requested/canonical IDs stay view-only.
+  const {nodes, context} = application();
+  context.recovery = recoveryFixture();
+  context.unit = {...context.recovery.user_services.items[0], id: "fixture-worker.service",
+    load_state: "loaded", can_start: false, refuse_manual_start: true, status: "unavailable"};
+  vm.runInContext("render(recovery, receiptFixture()); showDetails('Service',unit);", context);
+  assert.deepEqual(nodes.get("action-controls").children.map(button => button.textContent), ["Stop service"]);
+  context.unit.id = "agent-toolkit-dashboard.service";
+  vm.runInContext("showDetails('Service',unit);", context);
+  assert.equal(nodes.get("action-controls").hidden, true);
+  context.unit.id = "fixture-worker.service";
+  context.unit.unit = "agent-toolkit-dashboard.service";
+  vm.runInContext("showDetails('Service',unit);", context);
+  assert.equal(nodes.get("action-controls").hidden, true);
+});
+
+test("DP2 history pause freezes delayed automatic publication; manual snapshot and resume still publish", async () => {
+  // A Pause during response.json() must freeze both receipt meaning and quality, not just stop future requests.
+  const app = await historyApplication(), {nodes, context, pending, requests, timers} = app;
+  const frozen = actionHistoryView(nodes);
+  assert.match(frozen.events[0], /started; unresolved/);
+  automaticSnapshot(app);
+  pending.shift()(snapshotResponse(recoveryFixture()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.fetchCalls.at(-1).url, "/api/actions");
+  const terminal = actionHistoryFixture([app.started, {...app.started, event: "succeeded"}],
+    {detail: "Automatic terminal history", status: "partial", truncated: true,
+      quality: {...app.history.quality, invalid_lines: 1, incomplete_tail: true}});
+  let parsed;
+  const response = snapshotResponse(terminal);
+  response.json = () => new Promise(resolve => { parsed = resolve; });
+  pending.shift()(response);
+  await new Promise(resolve => setImmediate(resolve));
+  nodes.get("live-toggle").events.click();
+  parsed(terminal);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(actionHistoryView(nodes), frozen);
+  assert.equal(vm.runInContext("actionHistory", context), app.history);
+  assert.equal(vm.runInContext("actionHistoryBusy", context), false);
+  assert.equal(nodes.get("connection").textContent, "Paused");
+  assert.equal(timers.size, 0);
+  const count = requests.length;
+  vm.runInContext("refreshActionHistory();", context);
+  assert.equal(requests.length, count); // Automatic history is also quiet after Pause.
+  nodes.get("refresh-now").events.click();
+  pending.shift()(snapshotResponse(recoveryFixture()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.fetchCalls.at(-1).url, "/api/actions");
+  assert.equal(pending.length, 1);
+  const manual = {...terminal, detail: "Manual paused history"};
+  pending.shift()(snapshotResponse(manual));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.doesNotMatch(actionHistoryView(nodes).events[0], /unresolved/);
+  assert.match(actionHistoryView(nodes).quality, /Manual paused history/);
+  assert.equal(nodes.get("connection").textContent, "Paused");
+  assert.equal(timers.size, 0);
+  nodes.get("live-toggle").events.click();
+  pending.shift()(snapshotResponse(recoveryFixture()));
+  await new Promise(resolve => setImmediate(resolve));
+  pending.shift()(snapshotResponse({...manual, detail: "Resumed history"}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(actionHistoryView(nodes).quality, /Resumed history/);
+  assert.equal(nodes.get("live-toggle").attributes["aria-pressed"], "false");
+  automaticSnapshot(app);
+  pending.shift()(snapshotResponse(recoveryFixture()));
+  await new Promise(resolve => setImmediate(resolve));
+  pending.shift()(snapshotResponse({...manual, detail: "Automatic history after resume"}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(actionHistoryView(nodes).quality, /Automatic history after resume/);
+  assert.equal(requests.filter(url => url === "/api/action").length, 0);
+});
+
+for (const failure of ["HTTP", "JSON"]) {
+  test(`DP2 history pause freezes delayed automatic ${failure} error quality; explicit manual errors stay visible`, async () => {
+    // Catch/finally cannot silently replace frozen quality; authorized manual failures retain dated events and show the gap.
+    const app = await historyApplication(), {nodes, context, pending, requests, timers} = app;
+    const frozen = actionHistoryView(nodes);
+    automaticSnapshot(app);
+    pending.shift()(snapshotResponse(recoveryFixture()));
+    await new Promise(resolve => setImmediate(resolve));
+    nodes.get("live-toggle").events.click();
+    const failed = () => failure === "HTTP" ? {ok: false, status: 503} :
+      {ok: true, status: 200, json: async () => { throw new Error("Fixture JSON decode gap"); }};
+    pending.shift()(failed());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(actionHistoryView(nodes), frozen);
+    assert.equal(vm.runInContext("actionHistoryError", context), "");
+    assert.equal(vm.runInContext("actionHistoryBusy", context), false);
+    vm.runInContext("refreshActionHistory(true);", context);
+    assert.equal(pending.length, 1);
+    pending.shift()(failed());
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(actionHistoryView(nodes).events, frozen.events);
+    assert.match(actionHistoryView(nodes).quality, /Unavailable.*(HTTP 503|Fixture JSON decode gap).*no replay/);
+    vm.runInContext("refreshActionHistory(true);", context);
+    assert.equal(pending.length, 1);
+    pending.shift()(snapshotResponse({...app.history, detail: "Explicit manual recovery"}));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(actionHistoryView(nodes).quality, /Explicit manual recovery/);
+    assert.equal(vm.runInContext("actionHistoryError", context), "");
+    assert.equal(nodes.get("connection").textContent, "Paused");
+    assert.equal(timers.size, 0);
+    assert.equal(requests.filter(url => url === "/api/action").length, 0);
+  });
+}
+
+test("DP2 history pause defers manual snapshot history behind discarded automatic success or error", async () => {
+  // A pending automatic read cannot absorb manual provenance or permanently lose an explicit refresh request.
+  for (const outcome of ["success", "error"]) {
+    const app = await historyApplication(), {nodes, context, pending, requests, timers} = app;
+    const frozen = actionHistoryView(nodes);
+    automaticSnapshot(app);
+    pending.shift()(snapshotResponse(recoveryFixture()));
+    await new Promise(resolve => setImmediate(resolve));
+    const automaticHistory = pending.shift();
+    nodes.get("live-toggle").events.click();
+    nodes.get("refresh-now").events.click();
+    pending.shift()(snapshotResponse(recoveryFixture()));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(requests.filter(url => url === "/api/actions").length, 2);
+    const terminal = actionHistoryFixture([app.started, {...app.started, event: "succeeded"}]);
+    automaticHistory(outcome === "success" ? snapshotResponse(terminal) : {ok: false, status: 503});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(actionHistoryView(nodes), frozen);
+    assert.equal(vm.runInContext("actionHistory", context), app.history);
+    assert.equal(requests.filter(url => url === "/api/actions").length, 3);
+    assert.equal(pending.length, 1); // A new manual GET, never a relabelled automatic result.
+    pending.shift()(snapshotResponse({...terminal, detail: "Queued manual history"}));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(actionHistoryView(nodes).quality, /Queued manual history/);
+    assert.doesNotMatch(actionHistoryView(nodes).events[0], /unresolved/);
+    assert.equal(vm.runInContext("actionHistoryBusy", context), false);
+    assert.equal(nodes.get("connection").textContent, "Paused");
+    assert.equal(timers.size, 0);
+    assert.equal(requests.filter(url => url === "/api/action").length, 0);
+  }
+});
+
+test("DP2 history pause preserves the explicit post-attempt read without replaying a confirmed action", async () => {
+  // Post-attempt history is an authorized read even while paused and independently of an outstanding snapshot.
+  const {nodes, context, pending, requests} = application();
+  context.recovery = recoveryFixture();
+  vm.runInContext("render(recovery, receiptFixture()); showDetails('Service',recovery.user_services.items[0]);", context);
+  nodes.get("live-toggle").events.click();
+  nodes.get("action-controls").children.find(button => button.textContent === "Stop service").events.click();
+  nodes.get("action-run").events.click();
+  pending[1](snapshotResponse({ok: true, action_id: "b".repeat(32), message: "User service stop completed.",
+    observation: recoveryServiceState("inactive")}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(requests.filter(url => url === "/api/actions").length, 1);
+  assert.equal(requests.filter(url => url === "/api/action").length, 1);
+  pending[2](snapshotResponse(actionHistoryFixture([], {detail: "Post-attempt paused history"})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(actionHistoryView(nodes).quality, /Post-attempt paused history/);
+  assert.equal(nodes.get("connection").textContent, "Paused");
+  nodes.get("action-run").events.click();
+  assert.equal(requests.filter(url => url === "/api/action").length, 1);
 });

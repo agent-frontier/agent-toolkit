@@ -28,11 +28,11 @@ import time
 from urllib.parse import urlsplit
 
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 LIMIT = 2 * 1024 * 1024
 ASSETS = Path(__file__).resolve().parent.parent / "dashboard"
-CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "cleanup-job-state", "container-inventory-all", "control-actions", "guarded-cleanup", "interactive-view", "lan-https", "loopback-only",
-                       "read-only", "snapshot-json", "systemd-services", "trusted-lan-readonly"])
+CAPABILITIES = sorted(["action-history", "authenticated-http", "cached-snapshot", "cleanup-job-state", "container-inventory-all", "control-actions", "guarded-cleanup", "interactive-view", "lan-https", "loopback-only",
+                       "observed-action-state", "read-only", "snapshot-json", "systemd-services", "trusted-lan-readonly", "workload-recovery"])
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 _actions_module = None
@@ -252,13 +252,18 @@ def container_inventory(path):
         raw = response.read(LIMIT + 1)
         if response.status != 200 or len(raw) > LIMIT:
             raise ValueError(f"container socket returned HTTP {response.status} or oversized data")
-        rows = json.loads(raw)
+        try:
+            rows = json.loads(raw)
+        except RecursionError:
+            raise ValueError("invalid container inventory nesting") from None
         if not isinstance(rows, list) or any(not isinstance(item, dict) for item in rows):
             raise ValueError("invalid container inventory")
         if any(not isinstance(item.get("Names", []), list)
                or any(not isinstance(name, str) for name in item.get("Names", []))
                for item in rows):
             raise ValueError("invalid container names")
+        if any(item.get("Labels") is not None and type(item["Labels"]) is not dict for item in rows):
+            raise ValueError("invalid container protection")
         return {
             "status": "available", "truncated": len(rows) > 100,
             "items": [
@@ -615,9 +620,15 @@ def handler_for(snapshot, token, controls=None):
             route = urlsplit(self.path)
             if route.query:
                 return self.respond(404, b'{"error":"not found"}')
-            if route.path == "/api/snapshot":
+            if route.path in {"/api/snapshot", "/api/actions"}:
                 if not self.authorized():
                     return self.respond(401, b'{"error":"access token required"}')
+                if route.path == "/api/actions":
+                    if controls is None:
+                        return self.respond(403, b'{"error":"homelab controls are disabled"}')
+                    return self.respond(200, json.dumps(
+                        controls.history(), ensure_ascii=True, allow_nan=False,
+                    ).encode())
                 body = snapshot.read()
                 return self.respond(200 if body else 503, body or b'{"status":"warming_up"}')
             assets = {

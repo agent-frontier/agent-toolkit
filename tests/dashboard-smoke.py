@@ -209,6 +209,35 @@ class AccessTests(unittest.TestCase):
         self.temp = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp.cleanup)
 
+    def fixture_http(self, controls, token=None):
+        cache = d.Snapshot()
+        cache.publish({"actions": controls.describe()})
+        server = d.DashboardServer(("127.0.0.1", 0), d.handler_for(cache, token, controls))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def close():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(close)
+        def request(path="/api/action", method="POST", payload=None, headers=None):
+            client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+            body = json.dumps(payload) if isinstance(payload, dict) else payload
+            if headers is None:
+                headers = {"Origin": f"http://127.0.0.1:{server.server_port}",
+                           "Content-Type": "application/json", "X-Action-Token": controls.nonce}
+                if token is not None:
+                    headers["Authorization"] = "Bearer " + token
+            try:
+                client.request(method, path, body=body, headers=headers)
+                response = client.getresponse()
+                raw = response.read()
+                return response.status, json.loads(raw) if raw else None
+            finally:
+                client.close()
+        return server, request
+
     def test_control_http_gates_reject_cross_site_and_unconfirmed_requests(self):
         # A LAN viewer must not become a form/CSRF/arbitrary-method control proxy.
         calls = []
@@ -385,12 +414,222 @@ class AccessTests(unittest.TestCase):
         old = {"authenticated-http", "cached-snapshot", "container-inventory-all", "control-actions",
                "interactive-view", "lan-https", "loopback-only", "read-only", "snapshot-json",
                "systemd-services", "trusted-lan-readonly"}
-        self.assertEqual(value["version"], "0.6.0")
-        self.assertEqual(set(value["capabilities"]), old | {"guarded-cleanup", "cleanup-job-state"})
+        self.assertEqual(value["version"], "0.7.0")
+        self.assertEqual(set(value["capabilities"]), old | {
+            "guarded-cleanup", "cleanup-job-state", "action-history",
+            "observed-action-state", "workload-recovery",
+        })
         self.assertEqual(value["capabilities"], sorted(value["capabilities"]))
         self.assertEqual(len(value["capabilities"]), len(set(value["capabilities"])))
         with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(Path(self.temp.name) / "defaults")}):
             self.assertFalse(d.server_settings(d.argparse.Namespace(port=None, interval=None))["actions"])
+
+    def test_recovery_http_user_service_stop_start_restart_from_retained_identity(self):
+        # Drive real HTTP/Controller/show/VERB/show, including a stopped unit disappearing from the capped list.
+        actions, unit = d.action_module(), "fixture-worker.service"
+        services = mock.Mock(return_value={"items": [{"unit": unit, "scope": "user"}]})
+        controls = actions.Controller(Path(self.temp.name) / "service-actions", mock.Mock(),
+                                      mock.Mock(), services, mock.Mock())
+        _, request = self.fixture_http(controls)
+        active = "active"
+        def systemctl(args, **kwargs):
+            nonlocal active
+            self.assertEqual(args[:2], ["systemctl", "--user"])
+            self.assertEqual(args[-2:], ["--", unit])
+            if args[2] == "show":
+                self.assertEqual(kwargs["timeout"], 2)
+                raw = (f"Id={unit}\nLoadState=loaded\nActiveState={active}\n"
+                       f"SubState={'running' if active == 'active' else 'dead'}\n"
+                       "Result=success\nExecMainStatus=0\nInvocationID=\nCanStart=yes\nRefuseManualStart=no\n")
+                return mock.Mock(returncode=0, stdout=raw)
+            self.assertIn(args[2], {"stop", "start", "restart"})
+            self.assertEqual(args, ["systemctl", "--user", args[2], "--", unit])
+            self.assertEqual(kwargs, {"stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                                    "stderr": subprocess.DEVNULL, "shell": False, "timeout": 12, "check": False})
+            active = "inactive" if args[2] == "stop" else "active"
+            services.return_value = {"items": [] if active == "inactive" else [{"unit": unit, "scope": "user"}],
+                                     "truncated": True}
+            return mock.Mock(returncode=0)
+        ids = []
+        with mock.patch.object(actions.subprocess, "run", side_effect=systemctl) as run:
+            for verb in ("stop", "start", "restart", "stop"):
+                status, result = request(payload={"kind": "service", "scope": "user", "unit": unit, "action": verb})
+                self.assertEqual(status, 200)
+                self.assertTrue(result["ok"])
+                self.assertEqual(result["observation"]["state"], active)
+                self.assertEqual(result["observation"]["unit"], unit)
+                self.assertRegex(result["action_id"], r"^[0-9a-f]{32}$")
+                ids.append(result["action_id"])
+            self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                             [part for verb in ("stop", "start", "restart", "stop")
+                              for part in ("show", verb, "show")])
+            for _ in range(2):
+                status, history = request("/api/actions", "GET")
+                self.assertEqual(status, 200)
+                self.assertEqual(len(history["events"]), 8)
+                self.assertEqual({event["action_id"] for event in history["events"]}, set(ids))
+            self.assertEqual(run.call_count, 12)  # History/refresh never replays a command.
+        self.assertEqual(services.call_count, 4)
+
+    def test_recovery_http_both_unix_engines_fixed_verbs_observe_exact_id_and_keep_volumes(self):
+        # No host daemon/CLI is used: the actual HTTP -> Controller -> Unix requests cross a disposable peer.
+        actions, identifier = d.action_module(), "a" * 64
+        records, state = [], {"value": "created"}
+        class Peer(d.BaseHTTPRequestHandler):
+            def do_POST(self):
+                records.append((self.command, self.path, self.rfile.read(int(self.headers.get("Content-Length", 0)))))
+                state["value"] = "exited" if self.path.endswith("/stop?t=10") else "running"
+                self.send_response(204)
+                self.end_headers()
+            def do_DELETE(self):
+                records.append((self.command, self.path, b""))
+                state["value"] = "absent"
+                self.send_response(204)
+                self.end_headers()
+            def do_GET(self):
+                records.append((self.command, self.path, b""))
+                # Exact 404 needs no body: the reader correctly discards error
+                # metadata and may close before a fake peer writes any of it.
+                raw = (b"" if state["value"] == "absent" else json.dumps({
+                    "Id": identifier, "State": {"Status": state["value"]},
+                    "Config": {"Labels": {}, "Env": ["secret-env"], "Cmd": ["secret-args"]},
+                }).encode())
+                self.send_response(404 if state["value"] == "absent" else 200)
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                if raw:
+                    self.wfile.write(raw)
+            def log_message(self, *args):
+                pass
+        path = Path(self.temp.name) / "recovery.sock"
+        peer = socketserver.UnixStreamServer(str(path), Peer)
+        thread = threading.Thread(target=peer.serve_forever, daemon=True)
+        thread.start()
+        def close():
+            peer.shutdown()
+            peer.server_close()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(close)
+        inventory = mock.Mock(side_effect=lambda endpoint: {"items": [
+            {"id": identifier, "State": state["value"], "protected": False}]})
+        endpoint = mock.Mock(return_value=path)
+        controls = actions.Controller(Path(self.temp.name) / "container-actions", endpoint, inventory,
+                                      mock.Mock(), mock.Mock())
+        _, request = self.fixture_http(controls)
+        ids = []
+        for engine in ("docker", "podman"):
+            state["value"] = "created"
+            for verb, method, suffix in (
+                ("start", "POST", "/start"), ("restart", "POST", "/restart?t=10"),
+                ("stop", "POST", "/stop?t=10"), ("remove", "DELETE", "?v=false&force=false"),
+            ):
+                status, result = request(payload={"kind": "container", "engine": engine,
+                                                  "id": identifier, "action": verb})
+                self.assertEqual(status, 200)
+                self.assertEqual(result["observation"]["state"], state["value"])
+                self.assertEqual(result["observation"]["id"], identifier)
+                self.assertNotIn("secret-", json.dumps(result))
+                self.assertEqual(records[-2:], [
+                    (method, f"/containers/{identifier}{suffix}", b""),
+                    ("GET", f"/containers/{identifier}/json", b""),
+                ])
+                ids.append(result["action_id"])
+        status, history = request("/api/actions", "GET")
+        self.assertEqual(status, 200)
+        self.assertEqual(len(history["events"]), 16)
+        self.assertEqual({event["action_id"] for event in history["events"]}, set(ids))
+        self.assertNotIn("secret-", json.dumps(history))
+        self.assertEqual((inventory.call_count, endpoint.call_count), (8, 8))
+
+    def test_action_history_get_auth_origin_optin_quality_and_no_side_effects(self):
+        # The new fixed GET shares GET authority, needs opt-in but no nonce, and cannot create/repair history.
+        actions = d.action_module()
+        controls = actions.Controller(Path(self.temp.name) / "history-only", mock.Mock(),
+                                      mock.Mock(), mock.Mock(), mock.Mock())
+        token = d.secrets.token_urlsafe(32)
+        server, request = self.fixture_http(controls, token)
+        auth = {"Authorization": "Bearer " + token}
+        with mock.patch.object(controls, "history", wraps=controls.history) as read, \
+                mock.patch.object(Path, "mkdir") as mkdir, mock.patch.object(actions.os, "write") as write, \
+                mock.patch.object(actions.fcntl, "flock") as flock:
+            self.assertEqual(request("/api/actions", "GET", headers={})[0], 401)
+            for headers in (dict(auth, Host="foreign.invalid"), dict(auth, Origin="https://foreign.invalid"),
+                            dict(auth, **{"Sec-Fetch-Site": "cross-site"})):
+                self.assertEqual(request("/api/actions", "GET", headers=headers)[0], 403)
+            self.assertEqual(request("/api/actions?limit=100", "GET", headers=auth)[0], 404)
+            self.assertEqual(request("/api/actions/other", "GET", headers=auth)[0], 404)
+            self.assertEqual(request("/api/actions", "POST", payload={}, headers=auth)[0], 405)
+            read.assert_not_called()
+            status, history = request("/api/actions", "GET", headers=auth)
+            self.assertEqual(status, 200)
+            self.assertEqual(history["status"], "no_history_yet")
+            self.assertEqual(history["events"], [])
+            self.assertEqual(request("/api/actions", "HEAD", headers=auth), (200, None))
+            self.assertFalse(controls.state_dir.exists())
+            mkdir.assert_not_called()
+            write.assert_not_called()
+            flock.assert_not_called()
+            server.RequestHandlerClass = d.handler_for(d.Snapshot(), token)
+            self.assertEqual(request("/api/actions", "GET", headers=auth)[0], 403)
+            self.assertEqual(read.call_count, 2)
+            server.RequestHandlerClass = d.handler_for(d.Snapshot(), None, controls)
+            self.assertEqual(request("/api/actions", "GET", headers={})[0], 200)
+        controls.state_dir.mkdir(mode=0o700)
+        path = controls.state_dir / actions.AUDIT_NAME
+        path.touch(mode=0o600)
+        path.write_bytes(b"\xff\n{bad}\npartial")
+        status, history = request("/api/actions", "GET", headers={})
+        self.assertEqual((status, history["status"]), (200, "partial"))
+        self.assertEqual(history["quality"]["invalid_lines"], 2)
+        self.assertTrue(history["quality"]["incomplete_tail"])
+        self.assertNotIn(token, json.dumps(history))
+        self.assertNotIn(controls.nonce, json.dumps(history))
+        path.chmod(0o644)
+        self.assertEqual(request("/api/actions", "GET", headers={})[1]["status"], "unavailable")
+        controls._services.assert_not_called()
+        controls._container_socket.assert_not_called()
+
+    def test_recovery_http_malformed_scope_decode_gaps_and_post_read_are_structured(self):
+        # Fresh callback/decoder failures stay JSON; failed post-reading does not turn a successful command into failure.
+        actions, unit = d.action_module(), "fixture-worker.service"
+        services = mock.Mock(return_value={"items": [{"unit": unit, "scope": "user"}]})
+        controls = actions.Controller(Path(self.temp.name) / "structured-actions", mock.Mock(),
+                                      mock.Mock(), services, mock.Mock())
+        _, request = self.fixture_http(controls)
+        payload = {"kind": "service", "scope": "user", "unit": unit, "action": "start"}
+        good = unit_state(unit=unit, id=unit)
+        with mock.patch.object(actions.subprocess, "run", return_value=mock.Mock(returncode=0)) as run, \
+                mock.patch.object(actions, "user_unit_state", return_value=good) as read:
+            for raw in (b"\xff", b"[" * 1100 + b"]" * 1100):
+                self.assertEqual(request(payload=raw)[0], 400)
+            for scope in (None, True, [], "system"):
+                services.return_value = {"items": [{"unit": unit, "scope": scope}]}
+                self.assertEqual(request(payload=payload)[0], 403)
+            read.assert_not_called()
+            run.assert_not_called()
+            services.side_effect = UnicodeDecodeError("utf-8", b"\xff", 0, 1, "secret-UTF")
+            status, result = request(payload=payload)
+            self.assertEqual(status, 503)
+            self.assertNotIn("secret-", json.dumps(result))
+            services.side_effect = None
+            services.return_value = {"items": []}
+            read.return_value = unit_state(unit=unit, id="agent-toolkit-dashboard.service", status="unavailable")
+            self.assertEqual(request(payload=payload)[0], 403)
+            run.assert_not_called()
+            read.side_effect = [good, unit_state(unit=unit, id=None, status="unknown",
+                                                error="malformed", detail="Fixture text decode gap.")]
+            status, result = request(payload=payload)
+            self.assertEqual(status, 200)
+            self.assertTrue(result["ok"])
+            self.assertEqual(result["observation"]["state"], "unknown")
+            self.assertEqual(result["observation"]["error"], "malformed")
+            run.assert_called_once_with(
+                ["systemctl", "--user", "start", "--", unit], stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=False, timeout=12, check=False)
+            events = [json.loads(line) for line in (controls.state_dir / actions.AUDIT_NAME).read_text().splitlines()]
+            self.assertEqual(events[-1]["event"], "succeeded")
+            self.assertEqual(events[-1]["action_id"], result["action_id"])
 
     def test_cleanup_real_signal_exit_returns_http_unknown_with_observation(self):
         # Cross actual HTTP/Controller and original subprocess runner; never launch a host unit.

@@ -4,7 +4,8 @@ The optional dashboard shows live disk availability and inode usage, CPU,
 RAM/swap, uptime, network throughput, top processes, system/user services,
 Docker/Podman containers in all states, and Janitor cache budgets and activity.
 It is **read-only by default**. Explicit homelab controls add fixed
-Stop/Kill/Remove actions, not a terminal or arbitrary-command endpoint.
+Start/Restart/Stop/Kill/Remove and guarded cleanup actions, not a terminal or
+arbitrary-command endpoint.
 It uses Python 3.10+ and local static assets; no npm build, metrics database,
 third-party scripts or telemetry.
 
@@ -164,9 +165,10 @@ Both running and stopped/created containers are included. Docker and the
 current user's Podman inventory have separate headings and engine/state filters.
 For user Podman, an operator can enable the private local socket with
 `systemctl --user enable --now podman.socket`; this does not start containers.
-The dashboard itself never enables sockets or starts containers. It does not
-change container state with `actions=false`; enabled homelab controls can
-stop/kill/remove the selected target as documented below. Rootful/system Podman
+The dashboard itself never enables sockets. Observer mode (`actions=false`)
+never starts or changes containers; enabled homelab controls can
+start/restart/stop/kill/remove only the selected existing target as documented
+below. No pull/create/unpause/prune or root fallback is offered. Rootful/system Podman
 is not silently combined with the user's inventory.
 
 ## Interactive viewing
@@ -187,7 +189,7 @@ Tap a service, process or container name for dated snapshot details, or
 Janitor results (**View last cleanup** on older backends). These are inspection controls
 only while controls are disabled. All detail text is rendered as text, not HTML.
 
-## Homelab Stop / Kill / Remove
+## Homelab fixed controls
 
 Set `"actions": true` in the same private profile and restart the dashboard to
 enable controls. Default installations remain observers. In `trusted_lan` mode
@@ -196,17 +198,77 @@ entry or terminal step is imposed on the phone.
 
 Tap an item, choose its action, then confirm the exact named target:
 
-- Docker/Podman: **Stop gracefully** gives the daemon up to 10 seconds before it
+- Docker/current-user Podman: **Start container** accepts only
+  created/exited/stopped containers. **Restart container** accepts only running
+  containers and disrupts the workload: the daemon waits up to **10 seconds**,
+  then may **force-kill** before starting it again. The confirmation discloses
+  this grace/escalation. **Stop gracefully** gives the daemon up to 10 seconds before it
   may force-kill a container that has not exited. **Kill now** skips that grace
   period. **Remove container** applies once stopped/created and never deletes
-  volumes or recursively removes dependents.
+  volumes or recursively removes dependents. Every request uses the full
+  64-character ID, freshly checked state/protection and a fixed local route:
+  POST `/containers/ID/start`, `/containers/ID/restart?t=10`,
+  `/containers/ID/stop?t=10`, `/containers/ID/kill?signal=KILL`, or
+  DELETE `/containers/ID?v=false&force=false`. Starting an application can change
+  its own data; retaining volumes is not a promise that their contents stay unchanged.
 - Processes: **Terminate** (SIGTERM) or **Force kill** (SIGKILL), only for the
   dashboard user's processes. Fresh PID start-time and pidfd checks prevent
   killing a reused PID. The dashboard, its ancestors and core session processes
   are protected. A service manager may restart a killed process.
-- Services: **Stop service** for noncritical, loaded **user** units. System units,
+- Services: **Start service**, **Restart service** and **Stop service** for
+  noncritical, loaded **user** units. Start is offered for inactive/failed units;
+  Restart disrupts the service. Each dispatch freshly reads the exact user
+  manager's state, rejects missing/masked/unverified units and checks both
+  requested and canonical names against protection. Noncanonical aliases are
+  refused too; an alias never grants protected access. Start/Restart require
+  `CanStart=yes` and `RefuseManualStart=no`; a valid Stop does **not** require
+  manual-start usability. The only command is
+  `systemctl --user VERB -- UNIT`, bounded to **12 seconds**, with fixed verbs.
+  A stopped unit may leave the capped loaded inventory: its open details retain
+  the identity, and Start/Restart revalidate it through the exact user-manager
+  read instead of treating sampled-list absence as permission or disappearance.
+  System units,
   this dashboard, the disk guard and protected infrastructure stay view-only.
-  No root service privileges are granted.
+  No root, enable or unmask privileges are granted.
+
+The fixed `POST /api/action` retains exact body shapes: containers use
+`kind`, `engine`, `id`, `action`; services use `kind`, `scope:"user"`, `unit`,
+`action`; processes retain their PID/start-ticks body. Unknown fields,
+client-selected commands/methods/paths and unsupported verbs are rejected.
+The advertised `actions.container_actions` / `actions.service_actions` lists
+gate choices and dispatch. When an older backend lacks those lists, new assets
+retain legacy Stop/Kill/Remove and user-service Stop only; they never post new
+recovery verbs or fetch unsupported action history.
+
+### Exact post-action observations
+
+Workload results retain their command message, action ID and `completed_at`
+receipt fields, adding a separate `observation` with `status`, `state`,
+`read_at` (server read time), `detail` and the exact target identity.
+After an attempted command, containers use bounded
+GET `/containers/FULL_ID/json` over the same existing Unix socket with an
+independent **two-second total deadline** and the existing 2MiB response bound.
+Returned IDs must equal the original full ID; only narrow state/protection
+fields survive. Environments, command arguments and arbitrary metadata are discarded.
+An exact HTTP404 is `state:"absent"` / `status:"absent"`, **not stopped or healthy**.
+Capped-list disappearance, matching names and phone/server clock comparisons
+are never proof of target state.
+
+Processes are read using the original PID and start ticks: `present` means that
+identity still exists, not that it is running or healthy; `missing`, `replaced`
+and `unknown` stay distinct. A replacement is never re-signalled. Services use
+only a fresh exact user-unit read, preserving load/active/substate and typed
+result metadata. A stopped service can Start from retained details even if its
+row vanishes. Known post-state redraws available controls; an unknown/absent/
+replaced observation grants no unsafe action.
+
+Failed reads (including malformed JSON/Unicode) produce an explicit
+`observation.state:"unknown"` without turning a real successful workload
+command receipt into a failure or claiming application health. Actual command
+timeouts, signal-terminated helpers and lost outcome audits remain uncertain;
+an observed target state does not erase that uncertainty. Cleanup retains its
+separate dispatch-only/unknown semantics below. No observation automatically
+replays a mutation.
 
 ### Run guarded cleanup
 
@@ -277,7 +339,7 @@ Only one action runs at a time; the result is explicit and the single background
 sampler is woken afterward. Timeouts/interrupted requests can leave completion
 unknown: refresh before retrying instead of assuming nothing happened.
 Container mutation transport has a total 15-second monotonic budget, not an
-inactivity timeout that resets on each byte. Inventory reads use a separate
+inactivity timeout that resets on each byte. Inventory and exact container post-reads each use a separate
 two-second total transport budget. Unexpected mutation statuses are rejected
 without reading their response bodies.
 
@@ -293,6 +355,43 @@ journal retains only `started`; a missing terminal record is not proof of
 failure. The client receives unknown completion: inspect fresh state before
 retrying.
 Disable `"actions"` to restore observer mode without changing LAN access.
+
+### Bounded actual action history
+
+With controls enabled, fixed GET `/api/actions` uses the **same GET Host/Origin,
+CIDR and authentication policy** as snapshots; it needs no action nonce.
+Disabled controls return403 (missing authentication still returns401 under
+token policy). There are no query selectors, arbitrary log paths or mutation
+methods. The response contains `events` (at most **20 actual journal events**,
+newest retained events in file order), `status`, server `read_at`, `truncated`,
+`detail`, and a `quality` object:
+
+- `tail_truncated`, `events_truncated`: boolean bounds/coverage indicators;
+- `invalid_lines`: integer count of invalid complete entries, including
+  invalid UTF/JSON, excessive nesting and malformed numeric fields;
+- `incomplete_first_line`, `incomplete_tail`: skipped partial boundary lines;
+- `changed_during_read`: visible concurrent file-size change or short read.
+
+Only the current file's **64KiB bounded tail** is read; rotated files are not
+searched. The reader reuses owned mode-0600 regular-file, no-symlink/no-hardlink
+checks and the writer's directory safety checks. It never mkdirs, flocks,
+writes, rotates, repairs or reads the whole growing log. `status:"no_history_yet"`
+(`NoHistoryYet`) is distinct from `"unavailable"` (unsafe/unreadable history)
+and `"partial"` (quality/coverage gaps), not a fabricated healthy empty result.
+
+Curated fields are actual action ID, kind, fixed verb, exact target, event/time,
+integer HTTP status, a message capped at512 characters and optional narrow
+observation/cleanup dispatch fields (detail capped at240 characters). Tokens,
+nonces, environments, arguments and arbitrary extras are never published.
+Cleanup events retain `accepted`/`observed` scheduling semantics, never a
+cleanup-completed event. A `started` record with no terminal event in the
+bounded window remains **unresolved**, not failed or completed.
+
+Recent activity may relate events only by an equal **actual action ID**.
+A lost response or action ID is an **UNLINKED browser attempt**; it is never
+attached to a journal event by target name or time. Refreshing, reopening a
+dialog, resuming updates and reading history never replay actions.
+This reuses the existing journal: no new logs, database or dependencies.
 
 ## Machine interface and operations
 
@@ -321,9 +420,14 @@ override them. `--url` reads the same profile and prints the configured scheme,
 address and port, so phones do not receive a stale localhost link. If overriding
 the service port on its command line, use the same `--port` with `--url` and any
 tunnel. Discovery retains the default-loopback capability and adds `lan-https`.
-Version `0.6.0` additionally advertises `guarded-cleanup` and `cleanup-job-state`
-in the alphabetically sorted, append-only capability list; read-only/default
-capability strings and observer defaults are retained.
+Version `0.7.0` retains `guarded-cleanup` / `cleanup-job-state` and appends literal
+`action-history`, `observed-action-state` and `workload-recovery` to the
+alphabetically sorted, append-only capability list and enabled
+`actions.capabilities`. Enabled metadata also advertises
+`container_actions:["kill","remove","restart","start","stop"]` and
+`service_actions:["restart","start","stop"]`. Older lists absent means legacy
+choices only and no history fetch; read-only/default capability strings,
+observer defaults and the existing LAN/TLS access policy are retained.
 
 To rotate a token, stop the service, move its private token file to a private
 backup, rerun `--init`, and restart. Existing browser sessions will need the new

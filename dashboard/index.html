@@ -58,6 +58,7 @@
         </section>
         <section class="panel"><div class="section-heading"><div><p class="eyebrow">CONTAINERS</p><h2>Docker &amp; Podman</h2></div></div><div class="filters list-controls"><label class="sr-only" for="container-search">Filter containers</label><input id="container-search" type="search" placeholder="Container name or image..."><label class="sr-only" for="container-engine">Container engine</label><select id="container-engine"><option value="all">Both engines</option><option value="docker">Docker</option><option value="podman">Podman</option></select><label class="sr-only" for="container-state">Container state</label><select id="container-state"><option value="all">All states</option><option value="running">Running</option><option value="stopped">Not running</option></select></div><div id="containers"></div></section>
       </div>
+      <section id="actions-panel" class="panel" hidden><h2>Recent action receipts</h2><p id="actions-quality" class="muted" role="status">History not read yet.</p><p id="unlinked-attempt" role="status" hidden></p><ul id="recent-actions"></ul></section>
       <section id="errors-panel" class="panel" hidden><h2>Observation gaps</h2><p class="muted">Unavailable data is not a healthy zero.</p><ul id="errors"></ul></section>
     </div>
   </main>

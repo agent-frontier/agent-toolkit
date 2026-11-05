@@ -8,6 +8,11 @@ let refreshing = false;
 let detailTarget = null;
 let pendingAction = null;
 let actionBusy = false;
+let actionHistory = null;
+let actionHistoryBusy = false;
+let actionHistoryManualPending = false;
+let actionHistoryError = "";
+let unlinkedAttempt = "";
 const CLEANUP_UNIT = "system-janitor-catchup.service";
 const cleanupRunning = new Set(["active", "activating", "deactivating", "reloading", "refreshing"]);
 let token = new URLSearchParams(location.hash.slice(1)).get("token") || sessionStorage.getItem("dashboard-token") || "";
@@ -51,6 +56,153 @@ function cleanupFeature() {
     ["guarded-cleanup", "cleanup-job-state"].every(name => actions.capabilities.includes(name)) &&
     control?.kind === "cleanup" && control.action === "run" && control.unit === CLEANUP_UNIT &&
     control.scope === "user" && control.dispatch_only === true;
+}
+function advertisedActions(kind) {
+  const legacy = kind === "Container" ? ["stop", "kill", "remove"] : ["stop"];
+  const known = [...legacy, "start", "restart"];
+  const values = snapshot?.actions?.[kind === "Container" ? "container_actions" : "service_actions"];
+  if (values === undefined) return legacy;
+  if (!Array.isArray(values) || values.some(value => typeof value !== "string" || !known.includes(value)) ||
+      new Set(values).size !== values.length) return [];
+  const recovery = Array.isArray(snapshot.actions.capabilities) &&
+    snapshot.actions.capabilities.includes("workload-recovery");
+  return values.filter(value => legacy.includes(value) || recovery);
+}
+function observedActionsFeature() {
+  return snapshot?.actions?.enabled === true && Array.isArray(snapshot.actions.capabilities) &&
+    snapshot.actions.capabilities.includes("observed-action-state");
+}
+function actionHistoryFeature() {
+  const actions = snapshot?.actions;
+  return observedActionsFeature() && actions.capabilities.includes("action-history") &&
+    actions.capabilities.includes("workload-recovery") &&
+    Array.isArray(actions.container_actions) && Array.isArray(actions.service_actions) &&
+    advertisedActions("Container").length > 0 && advertisedActions("Service").length > 0;
+}
+function workloadChoices(kind, item) {
+  if (snapshot?.actions?.enabled !== true || detailTarget?.unverified) return [];
+  let choices = [];
+  if (kind === "Container" && !item.protected && ["docker", "podman"].includes(item.engine) &&
+      /^[a-f0-9]{64}$/.test(item.id || "")) {
+    const modern = Array.isArray(snapshot.actions.container_actions);
+    if (["running", "paused", "restarting"].includes(item.State)) {
+      choices = [["stop", "Stop gracefully"], ["kill", "Kill now"]];
+      if (item.State === "running" && item.protected === false) choices.push(["restart", "Restart container"]);
+    } else if (["created", "exited", "stopped"].includes(item.State)) {
+      if (item.protected === false) choices.push(["start", "Start container"]);
+      choices.push(["remove", "Remove container"]);
+    } else if (!modern) choices = [["remove", "Remove container"]];
+    choices = choices.filter(([action]) => advertisedActions(kind).includes(action));
+  } else if (kind === "Process" && item.controllable) {
+    choices = [["terminate", "Terminate"], ["kill", "Force kill"]];
+  } else if (kind === "Service" && item.scope === "user" && !item.protected &&
+      !(snapshot.actions.protected_services || []).some(unit => unit === item.unit || unit === item.id)) {
+    choices = [["stop", "Stop service"]];
+    if (item.can_start !== false && item.refuse_manual_start !== true &&
+        (!item.load_state || item.load_state === "loaded") && (!item.id || item.id === item.unit)) {
+      if (["inactive", "failed"].includes(item.active)) choices.push(["start", "Start service"]);
+      if (["active", "inactive", "failed"].includes(item.active)) choices.push(["restart", "Restart service"]);
+    }
+    choices = choices.filter(([action]) => advertisedActions(kind).includes(action));
+  }
+  return choices;
+}
+function applyActionObservation(request, result) {
+  if (!detailTarget) return;
+  if (request.kind === "cleanup") { detailTarget.afterAttempt = true; return; }
+  if (!observedActionsFeature()) return;
+  const value = result.observation, item = detailTarget.item;
+  detailTarget.unverified = true;
+  if (!value || typeof value.read_at !== "string" || !Number.isFinite(Date.parse(value.read_at))) return;
+  if (request.kind === "container" && value.id === request.id && value.engine === request.engine &&
+      value.status === "available" && typeof value.protected === "boolean" &&
+      ["created", "exited", "stopped", "running", "paused", "restarting", "removing", "dead"].includes(value.state)) {
+    item.State = value.state; item.protected = value.protected; detailTarget.unverified = false;
+  } else if (request.kind === "service" && value.unit === request.unit && value.id === request.unit &&
+      value.scope === "user" && value.status === "available" && value.load_state === "loaded" &&
+      value.state === value.active && typeof value.can_start === "boolean" &&
+      typeof value.refuse_manual_start === "boolean" && typeof value.protected === "boolean" &&
+      [...cleanupRunning, "inactive", "failed"].includes(value.state)) {
+    Object.assign(item, {active: value.active, sub: value.sub, id: value.id, load_state: value.load_state,
+      can_start: value.can_start, refuse_manual_start: value.refuse_manual_start, protected: value.protected});
+    detailTarget.unverified = false;
+  } else if (request.kind === "process" && value.pid === request.pid &&
+      value.start_time_ticks === request.start_time_ticks && value.status === "available" && value.state === "present") {
+    detailTarget.unverified = false;
+  }
+  text("detail-observed", `Exact post-attempt state: ${value.state || "unknown"}; server read ${when(value.read_at)}. Snapshot details otherwise retained; not application health.`);
+}
+function actionReceipt(result) {
+  const id = typeof result.action_id === "string" && /^[a-f0-9]{32}$/.test(result.action_id) ? result.action_id : null;
+  if (!observedActionsFeature()) return "";
+  if (!id) {
+    unlinkedAttempt = "UNLINKED browser attempt: no action ID received. Not attached to history by target or time; never automatically replayed.";
+    renderActionHistory();
+    return `${unlinkedAttempt} `;
+  }
+  return `Request receipt ${id}: `;
+}
+function workloadObservation(value) {
+  if (!value) return "Exact target observation: unknown; no read received. Not application health.";
+  return `Exact target observation: ${value.state || "unknown"}; server read ${when(value.read_at)}. ${value.detail || ""} Not application health.`;
+}
+function renderActionHistory() {
+  $("actions-panel").hidden = !actionHistoryFeature();
+  if (!actionHistoryFeature()) return;
+  const value = actionHistory;
+  text("actions-quality", actionHistoryError || (!value ? "History not read yet." :
+    `${value.status}; server read ${when(value.read_at)}. ${value.detail || ""} Truncated: ${value.truncated}. ` +
+    `Tail truncated: ${value.quality.tail_truncated}; events capped: ${value.quality.events_truncated}; ` +
+    `invalid lines: ${value.quality.invalid_lines}; partial first line: ${value.quality.incomplete_first_line}; ` +
+    `incomplete tail: ${value.quality.incomplete_tail}; changed during read: ${value.quality.changed_during_read}.`));
+  text("unlinked-attempt", unlinkedAttempt); $("unlinked-attempt").hidden = !unlinkedAttempt;
+  const events = value?.events || [], terminal = new Set(events.filter(event => event.event !== "started").map(event => event.action_id));
+  list("recent-actions", events.map(event => {
+    const meaning = event.event === "started" && !terminal.has(event.action_id) ? "started; unresolved in this bounded history" :
+      event.kind === "cleanup" && event.event === "accepted" ? "accepted scheduling only, not cleanup completion" :
+      event.kind === "cleanup" && event.event === "observed" ? "existing runner observed; no duplicate scheduled" : event.event;
+    return `${event.action_id} / ${when(event.time)} / ${event.kind} ${event.action}: ${meaning}. ${event.message || ""}`;
+  }), value?.status === "no_history_yet" ? "NoHistoryYet: no actual journal events yet." : "No curated events in the current bounded read; check history quality.");
+}
+async function refreshActionHistory(manual = false) {
+  if (!actionHistoryFeature() || (paused && !manual)) return;
+  if (actionHistoryBusy) {
+    if (manual) actionHistoryManualPending = true;
+    return;
+  }
+  actionHistoryBusy = true;
+  let publish = false;
+  try {
+    const response = await fetch("/api/actions", {method: "GET", cache: "no-store",
+      headers: token ? {Authorization: "Bearer " + token} : {}, signal: AbortSignal.timeout(10000)});
+    if (!response.ok) throw new Error(`History unavailable (HTTP ${response.status})`);
+    const value = await response.json();
+    if (!value || !Array.isArray(value.events) || value.events.length > 20 || !value.quality ||
+        typeof value.truncated !== "boolean" || typeof value.read_at !== "string" ||
+        !Number.isFinite(Date.parse(value.read_at)) ||
+        !Number.isSafeInteger(value.quality.invalid_lines) || value.quality.invalid_lines < 0 ||
+        ["tail_truncated", "events_truncated", "incomplete_first_line", "incomplete_tail", "changed_during_read"]
+          .some(key => typeof value.quality[key] !== "boolean") ||
+        !["available", "partial", "no_history_yet", "unavailable"].includes(value.status) ||
+        value.events.some(event => !event || typeof event.action_id !== "string" ||
+          !/^[a-f0-9]{32}$/.test(event.action_id))) throw new Error("Malformed history response");
+    if (!actionHistoryFeature() || (paused && !manual)) return;
+    actionHistory = value; actionHistoryError = "";
+    publish = true;
+  } catch (error) {
+    if (actionHistoryFeature() && (!paused || manual)) {
+      actionHistoryError = `Unavailable: ${error.message}. Previous dated receipts, if any, are retained; no replay.`;
+      publish = true;
+    }
+  } finally {
+    actionHistoryBusy = false;
+    if (publish && (!paused || manual)) renderActionHistory();
+    // A manual request waiting behind an automatic read needs its own GET;
+    // never relabel the old response as manual or leave the read slot occupied.
+    const manualPending = actionHistoryManualPending;
+    actionHistoryManualPending = false;
+    if (manualPending) refreshActionHistory(true);
+  }
 }
 function receiptFor(response, requestedAt) {
   const receivedAt = performance.now(), date = response.headers?.get?.("Date");
@@ -137,14 +289,15 @@ function openMaintenance(confirm = false) {
 }
 function showDetails(kind, item) {
   if (actionBusy) return;
-  detailTarget = {kind, item};
+  // Post-action facts update the retained dialog, never the historical cached row.
+  detailTarget = {kind, item: {...item}};
   pendingAction = null;
   $("action-confirm").hidden = true;
   text("action-result", "");
   const fields = kind === "Maintenance" ? maintenanceFields(item) :
     kind === "Service" ? [["Unit", item.unit], ["Scope", item.scope], ["State", item.active], ["Substate", item.sub], ["Description", item.description]] :
     kind === "Process" ? [["Name", item.name], ["PID", item.pid], ["CPU", pct(item.cpu_percent)], ["RAM", bytes(item.memory_bytes)]] :
-    kind === "Container" ? [["Name", item.Names], ["Engine", item.engine], ["ID", item.ID], ["Image", item.Image], ["State", item.State || item.Status]] :
+    kind === "Container" ? [["Name", item.Names], ["Engine", item.engine], ["ID", item.id || item.ID], ["Image", item.Image], ["State", item.State || item.Status]] :
     [["Run", item.run_id], ["Started", when(item.started_at)], ["Finished", when(item.ended_at)], ["Reclaimed", bytes(Number.isFinite(item.freed_kb) ? item.freed_kb * 1024 : null)], ["Safety integrity", item.safety_integrity]];
   text("detail-title", `${kind} details`);
   text("detail-observed", `Snapshot observed ${when(snapshot?.generated_at)}; this detail view is fixed until reopened.`);
@@ -160,20 +313,18 @@ function drawActions() {
     return;
   }
   const {kind, item} = detailTarget;
-  let choices = [];
+  let choices = workloadChoices(kind, item);
   if (kind === "Maintenance") {
-    if (cleanupAllowed()) choices = [["run", "Run guarded cleanup"]];
-    text("detail-policy", cleanupPolicy());
-  } else if (kind === "Container" && !item.protected && /^[a-f0-9]{64}$/.test(item.id || "")) {
-    choices = item.State === "running" || item.State === "paused" || item.State === "restarting" ?
-      [["stop", "Stop gracefully"], ["kill", "Kill now"]] : [["remove", "Remove container"]];
-    text("detail-policy", "Container actions keep all volumes. Running containers must be stopped before removal.");
+    if (!detailTarget.afterAttempt && cleanupAllowed()) choices = [["run", "Run guarded cleanup"]];
+    text("detail-policy", detailTarget.afterAttempt ? "Scheduling receipt retained. Refresh/reopen Maintenance for current runner state; no automatic retry." : cleanupPolicy());
+  } else if (detailTarget.unverified) {
+    text("detail-policy", "Exact target observation is unknown, absent or replaced. No unsafe action granted; reopen from a fresh inventory before choosing another guarded action.");
+  } else if (kind === "Container" && choices.length) {
+    text("detail-policy", "Fixed existing-container controls keep volumes. Restart disrupts the workload and may force-kill after 10 seconds. Fresh server guards apply.");
   } else if (kind === "Process" && item.controllable) {
-    choices = [["terminate", "Terminate"], ["kill", "Force kill"]];
     text("detail-policy", "Signals target this exact process identity. A service manager may restart it; stop its user service instead if needed.");
-  } else if (kind === "Service" && item.scope === "user" && !(snapshot.actions.protected_services || []).includes(item.unit)) {
-    choices = [["stop", "Stop service"]];
-    text("detail-policy", "Stops this user service. Core connectivity, the dashboard and protected services stay guarded.");
+  } else if (kind === "Service" && choices.length) {
+    text("detail-policy", "Fixed loaded user-service controls; fresh exact user-manager state and canonical protection are rechecked. No root/enable/unmask. Retained identity can recover a stopped service outside the capped list.");
   } else {
     text("detail-policy", kind === "Service" ? "System/protected service: view-only. No root privileges are granted." :
       kind === "Process" ? "System, protected or unavailable process: view-only." : "No control action for this item.");
@@ -192,17 +343,22 @@ function confirmAction(action, label) {
   if (kind === "Maintenance" && (!cleanupAllowed() || action !== "run")) {
     text("detail-policy", cleanupPolicy()); return;
   }
+  if (kind !== "Maintenance" && !workloadChoices(kind, item).some(([choice]) => choice === action)) {
+    text("action-result", "Action is not advertised or allowed for this target. Refresh before choosing again."); return;
+  }
   const payload = kind === "Maintenance" ? {kind: "cleanup", action: "run"} :
     kind === "Container" ? {kind: "container", engine: item.engine, id: item.id, action} :
     kind === "Process" ? {kind: "process", pid: item.pid, start_time_ticks: item.start_time_ticks, action} :
     {kind: "service", scope: item.scope, unit: item.unit, action};
   const target = kind === "Maintenance" ? `${CLEANUP_UNIT} (current user)` :
-    kind === "Container" ? `${item.Names} (${item.engine}, ${item.ID})` :
+    kind === "Container" ? `${item.Names} (${item.engine}, ${item.id})` :
     kind === "Process" ? `${item.name} (PID ${item.pid})` : `${item.unit} (${item.scope})`;
   pendingAction = {payload, target, label};
   const effect = kind === "Maintenance" ? " Scheduling only, not cleanup completion. The existing guard may defer busy work or reclaim zero bytes; no force mode." :
     action === "remove" ? " Volumes will be kept." :
-    kind === "Container" && action === "stop" ? " The daemon waits up to 10 seconds, then may force-kill if it has not exited." : "";
+    kind === "Container" && ["stop", "restart"].includes(action) ?
+      `${action === "restart" ? " Restart disrupts this workload." : ""} The daemon waits up to 10 seconds, then may force-kill if it has not exited.` :
+    kind === "Service" && action === "restart" ? " Restart disrupts this user service." : "";
   text("action-question", `${label}: ${target}?${effect}`);
   text("action-run", label);
   $("action-confirm").hidden = false;
@@ -214,6 +370,11 @@ async function runAction() {
   if (request.payload.kind === "cleanup" && !cleanupAllowed()) {
     pendingAction = null; $("action-confirm").hidden = true;
     text("action-result", cleanupPolicy()); return;
+  }
+  if (request.payload.kind !== "cleanup" &&
+      !workloadChoices(detailTarget.kind, detailTarget.item).some(([action]) => action === request.payload.action)) {
+    pendingAction = null; $("action-confirm").hidden = true;
+    text("action-result", "Action metadata/state changed; no unsupported request sent."); return;
   }
   actionBusy = true;
   $("cleanup-run").disabled = true;
@@ -227,20 +388,28 @@ async function runAction() {
       body: JSON.stringify(request.payload), signal: AbortSignal.timeout(20000),
     });
     const result = await response.json();
+    const receipt = actionReceipt(result);
+    applyActionObservation(request.payload, result);
     if (request.payload.kind === "cleanup") {
-      if (!response.ok || !result.ok) throw new Error(cleanupReceipt(result));
-      text("action-result", cleanupReceipt(result));
+      text("action-result", receipt + cleanupReceipt(result) + (!response.ok || !result.ok ?
+        " Refresh the observation before retrying; an interrupted request may still complete." : ""));
     } else {
-      if (!response.ok || !result.ok) throw new Error(result.error || `Action failed (HTTP ${response.status})`);
-      text("action-result", result.message);
+      const message = result.message || result.error || `Action failed (HTTP ${response.status})`;
+      text("action-result", receipt + message + (observedActionsFeature() ? ` ${workloadObservation(result.observation)}` : "") +
+        (!response.ok || !result.ok ? " Refresh the observation before retrying; an interrupted request may still complete." : ""));
     }
   } catch (error) {
-    text("action-result", `${error.message}. Refresh the observation before retrying; an interrupted request may still complete.`);
+    if (observedActionsFeature()) {
+      actionReceipt({});
+      applyActionObservation(request.payload, {});
+    }
+    text("action-result", `${observedActionsFeature() ? `${unlinkedAttempt} ` : ""}${error.message}. Refresh the observation before retrying; an interrupted request may still complete.`);
   } finally {
     actionBusy = false; pendingAction = null;
     $("action-run").disabled = false; $("action-cancel").disabled = false; $("detail-close").disabled = false;
     $("action-confirm").hidden = true;
-    $("action-controls").replaceChildren(); $("action-controls").hidden = true;
+    drawActions();
+    refreshActionHistory(true);
     refresh(true);
   }
 }
@@ -282,7 +451,7 @@ function serviceRows() {
   text("failed-count", `${failed} failed / ${all.length} listed`);
   const unavailable = [!snapshot.system_services && "system", !snapshot.user_services && "user"].filter(Boolean);
   text("services-note", unavailable.length ? `Unavailable scopes: ${unavailable.join(", ")}. See observation gaps.` :
-    `${rows.length} shown. ${[snapshot.system_services, snapshot.user_services].some(scope => scope?.truncated) ? "Inventory capped at 250 per scope." : snapshot.actions?.enabled ? "Tap a user service for Stop; system units stay view-only." : "System + user scopes; observer mode."}`);
+    `${rows.length} shown. ${[snapshot.system_services, snapshot.user_services].some(scope => scope?.truncated) ? "Inventory capped at 250 per scope." : snapshot.actions?.enabled ? "Tap a user service for advertised fixed controls; system units stay view-only." : "System + user scopes; observer mode."}`);
 }
 function processRows() {
   const query = $("process-search").value.toLowerCase(), sort = $("process-sort").value;
@@ -430,6 +599,7 @@ function render(value, receipt = null) {
   list("errors", value.errors.map(error => `${error.source}: ${error.detail}`), "No observation errors.");
   drawHistory();
   serviceRows();
+  renderActionHistory();
 }
 let refreshTimer;
 async function refresh(manual = false) {
@@ -451,6 +621,7 @@ async function refresh(manual = false) {
     const value = await response.json();
     if (paused && !manual) return;
     render(value, receipt);
+    refreshActionHistory(manual);
     const age = observationAge(value.generated_at);
     if (!Number.isFinite(age)) { badge("connection", "Age unknown / stale", false); notice("Server-relative snapshot age evidence is unavailable. Refresh for authoritative time evidence; guarded cleanup stays disabled."); }
     else if (age > (value.stale_after_seconds || 20)) { badge("connection", "Stale data", false); notice(`Last observation is ${Math.round(age)} seconds old; the collector may be delayed.`); }
