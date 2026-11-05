@@ -138,6 +138,18 @@ field. Failed fetches keep the last values visibly stale. Services cover
 Process rows are capped at 15 and container inventories at 100 per engine;
 truncated inventories are labelled.
 
+**Cached cleanup context** names `maintenance-last.json`, its saved mode/date,
+server-relative age (unknown without valid HTTP receipt evidence), and the
+coverage of its cache/workspace lists. Per-cache bytes, soft budgets, activity,
+eligibility and deferral reasons are saved observations, not a new scan or
+deletion permission. Missing fields/lists mean **unknown**, not zero or safe.
+Workspace protection records can be carried forward from a previous phase;
+their displayed saved state is not a fresh verification.
+A budget is not an estimate of reclaimable bytes. Previously reclaimed bytes
+are not available to reclaim again. Root free space, removed artifact bytes
+and observed free-space change are separate metrics: never add/subtract
+overlapping categories to invent complete-disk attribution or a reclaim total.
+
 The dashboard does not read `/proc/PID/cmdline` or `/proc/PID/environ` or full
 service logs. Container API responses can include extra metadata such as
 commands; those fields are discarded, never published in snapshots or logs.
@@ -177,6 +189,16 @@ Use **Refresh now** to fetch the latest cached snapshot. **Pause updates** freez
 this device's view without stopping server-side collection, maintenance or other
 clients. A manual refresh while paused fetches once and remains paused; Resume
 returns to live polling. Only one snapshot request runs at a time.
+If a paused manual read fails, the dated old values remain visibly stale;
+**Refresh now** or **Resume updates** is required. There is no automatic retry
+while paused. Explicit post-action reads also leave Pause enabled.
+
+The section links above the overview jump directly to Maintenance, Containers,
+Services, Storage, Processes and the chart without replacing panels or filters.
+Links, row inspection buttons and other controls have at least44px targets.
+Phone service/process/filesystem rows present identities and labelled values
+vertically rather than splitting them across narrow columns. Container rows
+name their engine, current-user Podman scope and observed state.
 
 Services can be searched, filtered and sorted; failed-first remains the default.
 Processes can be searched by name/PID and sorted by CPU, RAM or name **within
@@ -188,6 +210,20 @@ Tap a service, process or container name for dated snapshot details, or
 **Maintenance details** for the named runner and separately dated budget/native
 Janitor results (**View last cleanup** on older backends). These are inspection controls
 only while controls are disabled. All detail text is rendered as text, not HTML.
+The named native dialog initially focuses **Close**; confirmations focus
+**Cancel**, name the exact engine/scope/target and send nothing on Cancel/Escape.
+During dispatch, dismissal is blocked; closing afterward cannot undo a request.
+Refresh preserves the exact focused identity (engine + full container ID,
+service scope + unit, or PID + start ticks). Closing/Escape restores the actual
+matching inspection opener, including a rebuilt row; a vanished identity falls
+back to its focusable section heading, never a matching name or reused PID.
+
+**Historical snapshot details** stay fixed until reopened. A separate
+**exact post-attempt state** gives the server read date and does not claim
+application health; **request receipts** describe the API attempt independently.
+Known exact state still supports retained user-service Start after Stop.
+Older/partial backend metadata is labelled, preserves legacy fixed controls and
+does not authorize unsupported cleanup/recovery requests or history reads.
 
 ## Homelab fixed controls
 

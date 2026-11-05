@@ -6,6 +6,7 @@ let snapshotReceipt = null;
 let paused = false;
 let refreshing = false;
 let detailTarget = null;
+let detailOpener = null;
 let pendingAction = null;
 let actionBusy = false;
 let actionHistory = null;
@@ -15,6 +16,8 @@ let actionHistoryError = "";
 let unlinkedAttempt = "";
 const CLEANUP_UNIT = "system-janitor-catchup.service";
 const cleanupRunning = new Set(["active", "activating", "deactivating", "reloading", "refreshing"]);
+const detailHeadings = {Service: "services-heading", Process: "processes-heading",
+  Container: "containers-heading", Maintenance: "maintenance-heading", Cleanup: "maintenance-heading"};
 let token = new URLSearchParams(location.hash.slice(1)).get("token") || sessionStorage.getItem("dashboard-token") || "";
 if (location.hash) history.replaceState(null, "", location.pathname);
 const bytes = value => {
@@ -31,9 +34,13 @@ function badge(id, value, good) {
   text(id, value);
   $(id).className = `badge ${good ? "good" : "warn"}`;
 }
-function row(values) {
+function row(values, labels = []) {
   const tr = document.createElement("tr");
-  values.forEach(value => { const td = document.createElement("td"); td.textContent = value; tr.append(td); });
+  values.forEach((value, index) => {
+    const td = document.createElement("td"); td.textContent = value;
+    if (labels[index]) td.setAttribute("data-label", labels[index]);
+    tr.append(td);
+  });
   return tr;
 }
 function list(id, values, empty) {
@@ -43,12 +50,47 @@ function list(id, values, empty) {
   });
 }
 function notice(message) { text("notice", message); $("notice").hidden = !message; }
-function detailFields(fields) {
-  $("detail-fields").replaceChildren();
+function detailFields(fields, id = "detail-fields") {
+  $(id).replaceChildren();
   fields.forEach(([key, value]) => {
     const dt = document.createElement("dt"), dd = document.createElement("dd");
-    dt.textContent = key; dd.textContent = value ?? "Unknown"; $("detail-fields").append(dt, dd);
+    dt.textContent = key; dd.textContent = value ?? "Unknown"; $(id).append(dt, dd);
   });
+}
+function targetKey(kind, item) {
+  if (kind === "Container" && ["docker", "podman"].includes(item.engine) && /^[a-f0-9]{64}$/.test(item.id || "")) return `container:${item.engine}:${item.id}`;
+  if (kind === "Service" && ["user", "system"].includes(item.scope) && typeof item.unit === "string" && item.unit) return `service:${item.scope}:${item.unit}`;
+  if (kind === "Process" && Number.isSafeInteger(item.pid) && item.pid > 0 &&
+      Number.isSafeInteger(item.start_time_ticks) && item.start_time_ticks >= 0) return `process:${item.pid}:${item.start_time_ticks}`;
+  return null; // Never substitute a name, short ID or reused PID for an exact identity.
+}
+function canFocus(node) {
+  const dialog = node?.closest("dialog");
+  return node?.isConnected && !node.disabled && !node.closest("[hidden]") && (!dialog || dialog.open);
+}
+function focusContext(node, kind) {
+  const opener = ["BUTTON", "A", "INPUT", "SELECT", "SUMMARY"].includes(node?.tagName) ? node : null;
+  return {node: opener, key: opener?.getAttribute("data-target-key"), heading: detailHeadings[kind]};
+}
+function restoreFocus(context) {
+  if (!context) return;
+  const matching = canFocus(context.node) ? context.node : context.key &&
+    [...document.querySelectorAll("button[data-target-key]")].find(node =>
+      node.getAttribute("data-target-key") === context.key && canFocus(node));
+  const target = matching || $(context.heading);
+  if (canFocus(target)) target.focus();
+}
+function rowFocus(id, kind) {
+  return $(id).contains(document.activeElement) ? focusContext(document.activeElement, kind) : null;
+}
+function inspectControl(button, kind, item) {
+  const key = targetKey(kind, item);
+  if (key) button.setAttribute("data-target-key", key);
+  const identity = kind === "Service" ? `${item.unit} (${item.scope} scope)` :
+    kind === "Container" ? `${item.Names} (${item.engine}, ${item.id || "full ID unknown"})` :
+    `${item.name} (PID ${item.pid}, start ticks ${item.start_time_ticks ?? "unknown"})`;
+  button.setAttribute("aria-label", `Inspect ${kind.toLowerCase()}: ${identity}`);
+  button.addEventListener("click", event => showDetails(kind, item, event.currentTarget));
 }
 function cleanupFeature() {
   const actions = snapshot?.actions, control = actions?.cleanup;
@@ -109,10 +151,17 @@ function workloadChoices(kind, item) {
 }
 function applyActionObservation(request, result) {
   if (!detailTarget) return;
-  if (request.kind === "cleanup") { detailTarget.afterAttempt = true; return; }
+  if (request.kind === "cleanup") {
+    detailTarget.afterAttempt = true;
+    $("detail-current").hidden = false;
+    text("detail-current", `Fresh unit observation after scheduling attempt: ${unitObservation(result.observation)} Scheduling is not cleanup completion; saved fields remain historical.`);
+    return;
+  }
   if (!observedActionsFeature()) return;
   const value = result.observation, item = detailTarget.item;
   detailTarget.unverified = true;
+  $("detail-current").hidden = false;
+  text("detail-current", "Exact post-attempt state: unknown; no verified server read received. Historical fields retained; not application health.");
   if (!value || typeof value.read_at !== "string" || !Number.isFinite(Date.parse(value.read_at))) return;
   if (request.kind === "container" && value.id === request.id && value.engine === request.engine &&
       value.status === "available" && typeof value.protected === "boolean" &&
@@ -130,7 +179,7 @@ function applyActionObservation(request, result) {
       value.start_time_ticks === request.start_time_ticks && value.status === "available" && value.state === "present") {
     detailTarget.unverified = false;
   }
-  text("detail-observed", `Exact post-attempt state: ${value.state || "unknown"}; server read ${when(value.read_at)}. Snapshot details otherwise retained; not application health.`);
+  text("detail-current", `Exact post-attempt state: ${value.state || "unknown"}; server read ${when(value.read_at)}. ${detailTarget.unverified ? "No further control authority granted. " : ""}Historical fields retained; not application health.`);
 }
 function actionReceipt(result) {
   const id = typeof result.action_id === "string" && /^[a-f0-9]{32}$/.test(result.action_id) ? result.action_id : null;
@@ -252,6 +301,20 @@ function unitObservation(service) {
   if (service.status !== "available") return `${CLEANUP_UNIT}: ${service.status || "unknown"}; ${service.detail || "state unavailable"}; read ${when(service.read_at)}.`;
   return `${CLEANUP_UNIT}: ${service.load_state} / ${service.active} / ${service.sub}; result ${service.result ?? "Unknown"}; exit ${service.exit_status ?? "Unknown"}; invocation ${service.invocation_id || "unverified"}; read ${when(service.read_at)}.`;
 }
+function storageFields(saved) {
+  const age = observationAge(saved?.generated_at);
+  const caches = Array.isArray(saved?.caches), workspaces = Array.isArray(saved?.workspaces);
+  const coverage = !caches && !workspaces ? "Unknown; no saved lists." :
+    `${caches ? `${saved.caches.length} cache records` : "Cache records unknown"} / ` +
+    `${workspaces ? `${saved.workspaces.length} workspace records` : "workspace records unknown"}; saved lists only, not complete disk attribution.`;
+  return [
+    ["Saved source", saved ? `maintenance-last.json (cached budget phase; mode ${saved.mode || "Unknown"})` : "Unknown; no saved budget phase."],
+    ["Observed cached Go bytes", bytes(saved?.cache_bytes)],
+    ["Cache observation age", saved?.generated_at ? `${when(saved.generated_at)} / ${Number.isFinite(age) && age >= 0 ? `${Math.round(age)}s old (server-relative)` : "age unknown"}` : "Unknown"],
+    ["Saved coverage", coverage],
+    ["Soft cache budget", bytes(saved?.cache_budget_bytes)],
+  ];
+}
 function maintenanceFields(item) {
   const service = item.service, saved = item.maintenance, native = item.last_run, timer = item.timer || {};
   const linked = item.maintenance_phase_linked === true && /^[0-9a-f]{32}$/.test(service?.invocation_id || "") &&
@@ -280,36 +343,42 @@ function cleanupReceipt(result) {
     `Scheduling ${dispatch?.status || "unknown"}; execution is not confirmed complete.`;
   return `${result.message || result.error || ""} ${receipt} Fresh unit observation: ${unitObservation(result.observation)}`;
 }
-function openMaintenance(confirm = false) {
+function openMaintenance(confirm = false, opener = document.activeElement) {
   if (actionBusy) return;
   if (snapshot?.janitor?.service || cleanupFeature()) {
-    showDetails("Maintenance", snapshot?.janitor || {});
+    showDetails("Maintenance", snapshot?.janitor || {}, opener);
     if (confirm && cleanupAllowed()) confirmAction("run", "Run guarded cleanup");
-  } else if (snapshot?.janitor?.last_run) showDetails("Cleanup", snapshot.janitor.last_run);
+  } else if (snapshot?.janitor?.last_run) showDetails("Cleanup", snapshot.janitor.last_run, opener);
 }
-function showDetails(kind, item) {
+function showDetails(kind, item, opener = document.activeElement) {
   if (actionBusy) return;
   // Post-action facts update the retained dialog, never the historical cached row.
   detailTarget = {kind, item: {...item}};
+  detailOpener = focusContext(opener, kind);
   pendingAction = null;
   $("action-confirm").hidden = true;
+  $("detail-current").hidden = true;
+  text("detail-current", "");
   text("action-result", "");
-  const fields = kind === "Maintenance" ? maintenanceFields(item) :
+  const fields = kind === "Maintenance" ? [...maintenanceFields(item), ...storageFields(item.maintenance)] :
     kind === "Service" ? [["Unit", item.unit], ["Scope", item.scope], ["State", item.active], ["Substate", item.sub], ["Description", item.description]] :
-    kind === "Process" ? [["Name", item.name], ["PID", item.pid], ["CPU", pct(item.cpu_percent)], ["RAM", bytes(item.memory_bytes)]] :
+    kind === "Process" ? [["Name", item.name], ["PID", item.pid], ["Start ticks", item.start_time_ticks], ["CPU", pct(item.cpu_percent)], ["RAM", bytes(item.memory_bytes)]] :
     kind === "Container" ? [["Name", item.Names], ["Engine", item.engine], ["ID", item.id || item.ID], ["Image", item.Image], ["State", item.State || item.Status]] :
     [["Run", item.run_id], ["Started", when(item.started_at)], ["Finished", when(item.ended_at)], ["Reclaimed", bytes(Number.isFinite(item.freed_kb) ? item.freed_kb * 1024 : null)], ["Safety integrity", item.safety_integrity]];
   text("detail-title", `${kind} details`);
-  text("detail-observed", `Snapshot observed ${when(snapshot?.generated_at)}; this detail view is fixed until reopened.`);
+  text("detail-observed", `Historical snapshot details: observed ${when(snapshot?.generated_at)}; fields below are fixed until reopened.`);
   detailFields(fields);
   drawActions();
   $("detail-dialog").showModal();
+  $("detail-close").focus();
 }
 function drawActions() {
   const controls = $("action-controls");
+  const focusedAction = controls.contains(document.activeElement) ? document.activeElement.getAttribute("data-action") : null;
   controls.replaceChildren(); controls.hidden = true;
   if (!snapshot?.actions?.enabled || !detailTarget) {
     text("detail-policy", "Read-only mode. Homelab controls are not enabled.");
+    if (focusedAction) $("detail-close").focus();
     return;
   }
   const {kind, item} = detailTarget;
@@ -332,12 +401,17 @@ function drawActions() {
   choices.forEach(([action, label]) => {
     const button = document.createElement("button");
     button.type = "button"; button.className = "danger"; button.textContent = label;
-    button.addEventListener("click", () => confirmAction(action, label));
+    button.setAttribute("data-action", action);
+    button.addEventListener("click", event => confirmAction(action, label, event?.currentTarget));
     controls.append(button);
   });
   controls.hidden = !choices.length;
+  if (focusedAction) {
+    const matching = [...controls.children].find(button => button.getAttribute("data-action") === focusedAction);
+    (matching || $("detail-close")).focus();
+  }
 }
-function confirmAction(action, label) {
+function confirmAction(action, label, opener = document.activeElement) {
   if (actionBusy || !detailTarget) return;
   const {kind, item} = detailTarget;
   if (kind === "Maintenance" && (!cleanupAllowed() || action !== "run")) {
@@ -352,29 +426,36 @@ function confirmAction(action, label) {
     {kind: "service", scope: item.scope, unit: item.unit, action};
   const target = kind === "Maintenance" ? `${CLEANUP_UNIT} (current user)` :
     kind === "Container" ? `${item.Names} (${item.engine}, ${item.id})` :
-    kind === "Process" ? `${item.name} (PID ${item.pid})` : `${item.unit} (${item.scope})`;
-  pendingAction = {payload, target, label};
+    kind === "Process" ? `${item.name} (PID ${item.pid}), start ticks ${item.start_time_ticks}` : `${item.unit} (${item.scope})`;
+  pendingAction = {payload, target, label, opener};
   const effect = kind === "Maintenance" ? " Scheduling only, not cleanup completion. The existing guard may defer busy work or reclaim zero bytes; no force mode." :
     action === "remove" ? " Volumes will be kept." :
     kind === "Container" && ["stop", "restart"].includes(action) ?
       `${action === "restart" ? " Restart disrupts this workload." : ""} The daemon waits up to 10 seconds, then may force-kill if it has not exited.` :
     kind === "Service" && action === "restart" ? " Restart disrupts this user service." : "";
-  text("action-question", `${label}: ${target}?${effect}`);
+  text("action-question", `${label}: ${target}?${effect} Cancel/Escape sends nothing before dispatch. Once dispatched, closing this view cannot undo the request.`);
   text("action-run", label);
   $("action-confirm").hidden = false;
   text("action-result", "");
+  $("action-cancel").focus();
+}
+function cancelAction() {
+  if (actionBusy) return;
+  const opener = pendingAction?.opener;
+  pendingAction = null; $("action-confirm").hidden = true;
+  (canFocus(opener) && $("detail-dialog").contains(opener) ? opener : $("detail-close")).focus();
 }
 async function runAction() {
   if (actionBusy || !pendingAction || !snapshot?.actions?.nonce) return;
   const request = pendingAction;
   if (request.payload.kind === "cleanup" && !cleanupAllowed()) {
     pendingAction = null; $("action-confirm").hidden = true;
-    text("action-result", cleanupPolicy()); return;
+    text("action-result", cleanupPolicy()); $("detail-close").focus(); return;
   }
   if (request.payload.kind !== "cleanup" &&
       !workloadChoices(detailTarget.kind, detailTarget.item).some(([action]) => action === request.payload.action)) {
     pendingAction = null; $("action-confirm").hidden = true;
-    text("action-result", "Action metadata/state changed; no unsupported request sent."); return;
+    text("action-result", "Action metadata/state changed; no unsupported request sent."); $("detail-close").focus(); return;
   }
   actionBusy = true;
   $("cleanup-run").disabled = true;
@@ -409,14 +490,16 @@ async function runAction() {
     $("action-run").disabled = false; $("action-cancel").disabled = false; $("detail-close").disabled = false;
     $("action-confirm").hidden = true;
     drawActions();
+    if ($("detail-dialog").open) $("detail-close").focus();
     refreshActionHistory(true);
     refresh(true);
   }
 }
 function inspectRow(values, kind, item) {
-  const tr = row(values), button = document.createElement("button");
+  const labels = kind === "Service" ? ["Service", "Scope", "State", "Description"] : ["Process", "PID", "CPU", "RAM"];
+  const tr = row(values, labels), button = document.createElement("button");
   button.type = "button"; button.className = "row-button"; button.textContent = values[0];
-  button.addEventListener("click", () => showDetails(kind, item));
+  inspectControl(button, kind, item);
   tr.children[0].replaceChildren(button);
   return tr;
 }
@@ -434,6 +517,7 @@ function toggleLive() {
 }
 function serviceRows() {
   if (!snapshot) return;
+  const focus = rowFocus("services", "Service");
   const query = $("service-search").value.toLowerCase();
   const state = $("service-state").value;
   const all = [snapshot.system_services, snapshot.user_services].flatMap(scope => scope?.items || []);
@@ -452,21 +536,25 @@ function serviceRows() {
   const unavailable = [!snapshot.system_services && "system", !snapshot.user_services && "user"].filter(Boolean);
   text("services-note", unavailable.length ? `Unavailable scopes: ${unavailable.join(", ")}. See observation gaps.` :
     `${rows.length} shown. ${[snapshot.system_services, snapshot.user_services].some(scope => scope?.truncated) ? "Inventory capped at 250 per scope." : snapshot.actions?.enabled ? "Tap a user service for advertised fixed controls; system units stay view-only." : "System + user scopes; observer mode."}`);
+  restoreFocus(focus);
 }
 function processRows() {
+  const focus = rowFocus("processes", "Process");
   const query = $("process-search").value.toLowerCase(), sort = $("process-sort").value;
   const rows = [...(snapshot?.processes?.items || [])].filter(item => `${item.name} ${item.pid}`.toLowerCase().includes(query));
   rows.sort((a, b) => sort === "name" ? a.name.localeCompare(b.name) :
     (sort === "memory" ? b.memory_bytes - a.memory_bytes : (b.cpu_percent ?? -1) - (a.cpu_percent ?? -1)) || a.pid - b.pid);
   $("processes").replaceChildren(...rows.map(item => inspectRow([item.name, item.pid, pct(item.cpu_percent), bytes(item.memory_bytes)], "Process", item)));
   if (!rows.length) $("processes").append(row([snapshot?.processes ? "No matching displayed processes" : "Process source unavailable", "", "", ""]));
+  restoreFocus(focus);
 }
 function containerRows() {
+  const focus = rowFocus("containers", "Container");
   $("containers").replaceChildren();
   const query = $("container-search").value.toLowerCase(), engine = $("container-engine").value || "all", state = $("container-state").value || "all";
   ["docker", "podman"].filter(tool => engine === "all" || tool === engine).forEach(tool => {
     const inventory = snapshot?.[tool];
-    const heading = document.createElement("h3"); heading.textContent = tool === "docker" ? "Docker" : "Podman";
+    const heading = document.createElement("h3"); heading.textContent = tool === "docker" ? "Docker / local engine" : "Podman / current user";
     $("containers").append(heading);
     if (!inventory || inventory.status !== "available") {
       const p = document.createElement("p"); p.className = "muted";
@@ -482,8 +570,8 @@ function containerRows() {
       const div = document.createElement("div"); div.className = "workload";
       const name = document.createElement("button"), detail = document.createElement("p");
       name.type = "button"; name.className = "row-button"; name.textContent = item.Names;
-      name.addEventListener("click", () => showDetails("Container", {...item, engine: tool}));
-      detail.className = "muted"; detail.textContent = `${item.State || item.Status} / ${item.Image}`;
+      inspectControl(name, "Container", {...item, engine: tool});
+      detail.className = "muted"; detail.textContent = `${tool === "podman" ? "Podman (current user)" : "Docker (local engine)"} / State: ${item.State || item.Status || "Unknown"} / Image: ${item.Image || "Unknown"}`;
       div.append(name, detail); $("containers").append(div);
     });
     if (!rows.length) {
@@ -496,6 +584,7 @@ function containerRows() {
       p.textContent = "Inventory capped at 100 containers; additional containers are not shown."; $("containers").append(p);
     }
   });
+  restoreFocus(focus);
 }
 function historyRows() {
   const points = snapshot?.history || [], minutes = Number($("history-window").value);
@@ -527,7 +616,12 @@ function drawHistory() {
 function renderMaintenance() {
   const item = snapshot?.janitor || {}, saved = item.maintenance, service = item.service;
   text("cache", bytes(saved?.cache_bytes));
-  text("cache-detail", `${bytes(saved?.cache_budget_bytes)} soft budget / ${when(saved?.generated_at)}`);
+  text("cache-detail", `${bytes(saved?.cache_budget_bytes)} soft budget / ${saved?.generated_at ? when(saved.generated_at) : "age unknown"}; cached, not a live scan`);
+  detailFields(storageFields(saved), "storage-summary");
+  list("storage-caches", (saved?.caches || []).map(cache =>
+    `${cache.path || "Unknown cache"} (${cache.kind || "kind unknown"}): ${bytes(cache.bytes)} observed / ${bytes(cache.budget_bytes)} soft budget; ` +
+    `active ${typeof cache.active === "boolean" ? cache.active : "Unknown"}; eligible ${typeof cache.eligible === "boolean" ? cache.eligible : "Unknown"} (saved decision, not permission); ${cache.reason || "reason unknown"}.`),
+  Array.isArray(saved?.caches) ? "No cache records in the saved list; not whole-disk coverage." : "Cache activity/protection coverage unknown; no saved list.");
   if (service || cleanupFeature()) {
     let label = "Runner unknown", good = false;
     if (service?.status === "unavailable") label = "Runner unavailable";
@@ -557,7 +651,8 @@ function renderMaintenance() {
   const details = !!service || cleanupFeature();
   text("cleanup-details", details ? "Maintenance details" : "View last cleanup");
   $("cleanup-details").disabled = !details && !item.last_run;
-  list("protected", (saved?.workspaces || []).filter(work => work.status !== "removed").map(work => `${work.path}: ${work.status}`), "No protected workspace records in the latest scan.");
+  list("protected", (saved?.workspaces || []).map(work => `${work.path || "Unknown workspace"}: saved state ${work.status || "Unknown"}`),
+    Array.isArray(saved?.workspaces) ? "No workspace records in the saved list; not whole-disk coverage." : "Workspace protection/deferral coverage unknown; no saved list.");
 }
 function render(value, receipt = null) {
   snapshot = value;
@@ -566,9 +661,15 @@ function render(value, receipt = null) {
   $("login").hidden = true;
   text("host", `${value.host} / ${value.actions?.enabled ? "homelab controls enabled" : "private, read-only monitoring"}`);
   badge("controls-status", value.actions?.enabled ? "Controls on - trusted access" : "Read-only", !value.actions?.enabled);
+  const unsupported = [!cleanupFeature() && "guarded cleanup",
+    !["Container", "Service"].every(kind => advertisedActions(kind).some(action => ["start", "restart"].includes(action))) && "recovery",
+    !actionHistoryFeature() && "action history"].filter(Boolean);
+  text("controls-compat", !value.actions?.enabled ? "Observer mode: inspection only; no control requests." :
+    unsupported.length ? `Legacy/partial backend metadata: existing fixed controls remain available; ${unsupported.join(", ")} not advertised.` :
+    "Backend-advertised fixed controls only; each action rechecks metadata and target state.");
   badge("connection", paused ? "Paused" : value.status === "healthy" ? "Live" : "Partial data", !paused && value.status === "healthy");
   liveControls();
-  text("updated", `Observed ${new Date(value.generated_at).toLocaleTimeString()}`);
+  text("updated", `Snapshot observed ${when(value.generated_at)}`);
   const system = value.system || {};
   const root = (value.filesystems || [])[0];
   text("disk-free", root ? bytes(root.available_bytes) : "Unknown");
@@ -584,7 +685,7 @@ function render(value, receipt = null) {
   text("uptime", uptime == null ? "Unknown" : `${Math.floor(uptime / 86400)}d ${Math.floor(uptime / 3600) % 24}h`);
   text("swap", `Swap ${bytes(system.swap_used_bytes)} / ${bytes(system.swap_total_bytes)}`);
   renderMaintenance();
-  $("filesystems").replaceChildren(...(value.filesystems || []).map(disk => row([disk.mount, bytes(disk.available_bytes), pct(disk.used_percent), disk.inode_used_percent == null ? "Unknown" : pct(disk.inode_used_percent)])));
+  $("filesystems").replaceChildren(...(value.filesystems || []).map(disk => row([disk.mount, bytes(disk.available_bytes), pct(disk.used_percent), disk.inode_used_percent == null ? "Unknown" : pct(disk.inode_used_percent)], ["Mount", "Available", "Used", "Inodes"])));
   if (!value.filesystems) $("filesystems").append(row(["Storage source unavailable", "", "", ""]));
   $("network").replaceChildren();
   (value.network || []).filter(item => item.received_bytes_per_second || item.sent_bytes_per_second || !item.name.startsWith("veth")).slice(0, 8).forEach(item => {
@@ -628,8 +729,10 @@ async function refresh(manual = false) {
     else notice("");
     sessionStorage.setItem("dashboard-token", token);
   } catch (error) {
-    badge("connection", "Disconnected / stale", false);
-    notice(`${error.message}. Retaining the last observation; retrying automatically.`);
+    if (paused && !manual) return;
+    badge("connection", paused ? "Paused / stale" : "Disconnected / stale", false);
+    const retained = snapshot ? `Retaining the dated observation from ${when(snapshot.generated_at)}; values may be stale.` : "No snapshot has been observed yet.";
+    notice(`${error.message}. ${retained} ${paused ? "Paused on this device. Use Refresh now or Resume updates to read again; no automatic retry." : "Retrying automatically."}`);
   } finally {
     refreshing = false;
     $("refresh-now").disabled = false;
@@ -648,10 +751,21 @@ $("container-search").addEventListener("input", containerRows);
 $("container-engine").addEventListener("change", containerRows);
 $("container-state").addEventListener("change", containerRows);
 $("history-window").addEventListener("change", drawHistory);
-$("detail-close").addEventListener("click", () => $("detail-dialog").close());
-$("detail-dialog").addEventListener("cancel", event => { if (actionBusy) event.preventDefault(); });
+$("detail-close").addEventListener("click", () => { if (!actionBusy) $("detail-dialog").close(); });
+$("detail-dialog").addEventListener("cancel", event => {
+  if (actionBusy) event.preventDefault();
+  else { pendingAction = null; $("action-confirm").hidden = true; }
+});
+$("detail-dialog").addEventListener("close", () => {
+  pendingAction = null; $("action-confirm").hidden = true;
+  const opener = detailOpener; detailOpener = null; restoreFocus(opener);
+});
 $("action-run").addEventListener("click", runAction);
-$("action-cancel").addEventListener("click", () => { if (!actionBusy) { pendingAction = null; $("action-confirm").hidden = true; } });
-$("cleanup-details").addEventListener("click", () => openMaintenance());
-$("cleanup-run").addEventListener("click", () => openMaintenance(true));
+$("action-cancel").addEventListener("click", cancelAction);
+$("cleanup-details").addEventListener("click", event => openMaintenance(false, event?.currentTarget));
+$("cleanup-run").addEventListener("click", event => openMaintenance(true, event?.currentTarget));
+document.querySelectorAll("[data-section-jump]").forEach(link => link.addEventListener("click", event => {
+  const heading = $(link.getAttribute("data-section-jump"));
+  event.preventDefault(); heading.focus({preventScroll: true}); heading.scrollIntoView({block: "start"});
+}));
 refresh();

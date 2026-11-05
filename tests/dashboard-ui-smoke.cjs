@@ -16,22 +16,95 @@ function application() {
     requestedAt: clock.monotonic, receivedAt: clock.monotonic,
   });
   let nextTimer = 0;
-  function element() {
-    return {
-      value: "", children: [], textContent: "", events: {}, attributes: {}, open: false,
-      append(...children) { this.children.push(...children); },
-      replaceChildren(...children) { this.children = children; },
+  // Model connected identities, explicit focus calls and dialog close/cancel events.
+  // This is not a layout engine, native focus trap or proof of browser touch geometry.
+  function element(tag = "div") {
+    let ownText = "";
+    const node = {
+      tagName: tag.toUpperCase(), value: "", children: [], events: {}, attributes: {},
+      parentElement: null, open: false, disabled: false, className: "",
+      get textContent() { return ownText + this.children.map(child => child.textContent).join(""); },
+      set textContent(value) { this.replaceChildren(); ownText = String(value); },
+      get isConnected() { return this === document.body || !!this.parentElement?.isConnected; },
+      get hidden() { return this.getAttribute("hidden") !== null; },
+      set hidden(value) { if (value) this.setAttribute("hidden", ""); else delete this.attributes.hidden; },
+      append(...children) {
+        children.forEach(child => { child.parentElement = this; this.children.push(child); });
+      },
+      replaceChildren(...children) {
+        this.children.forEach(child => { child.parentElement = null; });
+        this.children = []; ownText = "";
+        if (document.activeElement && !document.activeElement.isConnected) document.activeElement = document.body;
+        this.append(...children);
+      },
+      contains(other) { return this === other || this.children.some(child => child.contains(other)); },
+      matches(selector) {
+        if (selector.startsWith(".")) return this.className.split(/\s+/).includes(selector.slice(1));
+        const match = /^([a-z][\w-]*)?(?:\[([\w-]+)\])?$/i.exec(selector);
+        return !!match && (!match[1] || this.tagName === match[1].toUpperCase()) &&
+          (!match[2] || this.getAttribute(match[2]) !== null);
+      },
+      closest(selector) {
+        for (let node = this; node; node = node.parentElement) if (node.matches(selector)) return node;
+        return null;
+      },
       addEventListener(name, callback) { this.events[name] = callback; },
-      setAttribute(name, value) { this.attributes[name] = value; },
+      getAttribute(name) { return this.attributes[name] ?? null; },
+      setAttribute(name, value) {
+        this.attributes[name] = String(value);
+        if (name === "id") nodes.set(String(value), this);
+        if (name === "class") this.className = String(value);
+      },
+      focus() { if (this.isConnected && !this.disabled && !this.closest("[hidden]")) document.activeElement = this; },
+      scrollIntoView() { this.scrolled = true; },
       showModal() { this.open = true; },
-      close() { this.open = false; },
+      close() { if (this.open) { this.open = false; this.events.close?.({target: this, currentTarget: this}); } },
     };
+    return node;
   }
   const document = {
-    getElementById(id) { if (!nodes.has(id)) nodes.set(id, element()); return nodes.get(id); },
+    activeElement: null,
+    getElementById(id) {
+      if (!nodes.has(id)) { const node = element(); node.setAttribute("id", id); this.body.append(node); }
+      return nodes.get(id);
+    },
     createElement: element,
-    createElementNS: element,
+    createElementNS(namespace, tag) { return element(tag); },
+    querySelectorAll(selector) {
+      const parts = selector.split(/\s+/), result = [];
+      const visit = node => {
+        if (node.matches(parts.at(-1))) {
+          let ancestor = node.parentElement, index = parts.length - 2;
+          while (ancestor && index >= 0) {
+            if (ancestor.matches(parts[index])) index--;
+            ancestor = ancestor.parentElement;
+          }
+          if (index < 0) result.push(node);
+        }
+        node.children.forEach(visit);
+      };
+      this.body.children.forEach(visit);
+      return result;
+    },
   };
+  document.body = element("body"); document.activeElement = document.body;
+  // Load attributes/ancestry from the real HTML instead of inventing named dialogs or navigation.
+  const html = fs.readFileSync(path.join(__dirname, "../dashboard/index.html"), "utf8");
+  const stack = [document.body], voidTags = new Set(["input", "br", "hr", "img"]);
+  let inBody = false, previous = 0;
+  for (const match of html.matchAll(/<(\/?)([a-z][\w-]*)\b([^>]*)>/gi)) {
+    const [, closing, tag, attributes] = match;
+    if (tag === "body") { if (closing) break; inBody = true; previous = match.index + match[0].length; continue; }
+    if (!inBody) continue;
+    const content = html.slice(previous, match.index).trim();
+    if (content) { const node = element("text"); node.textContent = content; stack.at(-1).append(node); }
+    previous = match.index + match[0].length;
+    if (closing) { stack.pop(); continue; }
+    const node = element(tag);
+    for (const attr of attributes.matchAll(/([\w-]+)(?:="([^"]*)")?/g)) node.setAttribute(attr[1], attr[2] ?? "");
+    stack.at(-1).append(node);
+    if (!voidTags.has(tag)) stack.push(node);
+  }
   const context = vm.createContext({
     document, URLSearchParams, location: { hash: "" },
     AbortSignal, performance: {now: () => clock.monotonic}, receiptFixture,
@@ -46,7 +119,14 @@ function application() {
   });
   vm.runInContext(fs.readFileSync(path.join(__dirname, "../dashboard/app.js"), "utf8"), context);
   document.getElementById("service-state").value = "live";
-  return { nodes, context, requests, pending, timers, fetchCalls, clock };
+  const escapeDialog = () => {
+    const dialog = nodes.get("detail-dialog");
+    const event = {defaultPrevented: false, preventDefault() { this.defaultPrevented = true; }};
+    dialog.events.cancel?.(event);
+    if (!event.defaultPrevented) dialog.close(); // Native cancel default; close then emits its own event.
+    return event;
+  };
+  return { nodes, context, document, escapeDialog, requests, pending, timers, fetchCalls, clock };
 }
 
 function snapshotResponse(value, date = new Date().toUTCString()) {
@@ -136,6 +216,36 @@ function automaticSnapshot(app) {
   assert.equal(app.timers.size, 1);
   app.timers.values().next().value(); // Actual refresh() timer, not the manual refresh(true) path.
   assert.equal(app.fetchCalls.at(-1).url, "/api/snapshot");
+}
+
+function identityFixture() {
+  const value = recoveryFixture();
+  value.system_services = {items: [{...value.user_services.items[0], scope: "system"}]};
+  value.docker = {status: "available", items: [{...value.podman.items[0], engine: "docker"}]};
+  value.processes = {items: [{name: "fixture-worker", pid: 22, start_time_ticks: 123,
+    cpu_percent: 5, memory_bytes: 100, controllable: true}], total_observed: 1, unreadable: 0};
+  return value;
+}
+
+const identityCases = [
+  {key: "service:user:fixture-worker.service", heading: "services-heading",
+    remove(value) { value.user_services.items = []; }},
+  {key: `container:podman:${"a".repeat(64)}`, heading: "containers-heading",
+    remove(value) { value.podman.items = []; }},
+  {key: "process:22:123", heading: "processes-heading",
+    remove(value) { value.processes.items[0].start_time_ticks = 124; }},
+];
+
+function inspectButton(app, key) {
+  const button = app.document.querySelectorAll("button[data-target-key]")
+    .find(button => button.getAttribute("data-target-key") === key);
+  assert.ok(button, `Missing exact inspect identity: ${key}`);
+  return button;
+}
+
+function inspectClick(button) {
+  button.focus();
+  button.events.click({currentTarget: button, target: button});
 }
 
 test("opening the plain URL requests data without a token or a terminal command", () => {
@@ -897,4 +1007,232 @@ test("DP2 history pause preserves the explicit post-attempt read without replayi
   assert.equal(nodes.get("connection").textContent, "Paused");
   nodes.get("action-run").events.click();
   assert.equal(requests.filter(url => url === "/api/action").length, 1);
+});
+
+test("DP3 real HTML section links focus their destinations without replacing legacy controls", () => {
+  // Execute the app's jump listeners against its actual HTML; this proves focus wiring, not viewport geometry.
+  const app = application(), {nodes, context, document, requests} = app;
+  context.value = maintenanceFixture();
+  delete context.value.actions.capabilities;
+  delete context.value.actions.cleanup;
+  vm.runInContext("render(value, receiptFixture()); refreshActionHistory();", context);
+  const links = document.querySelectorAll("nav a");
+  assert.deepEqual(links.slice(0, 3).map(link => link.getAttribute("href")),
+    ["#maintenance-heading", "#containers-heading", "#services-heading"]);
+  for (const link of links) {
+    let prevented = false;
+    link.events.click({preventDefault() { prevented = true; }});
+    const id = link.getAttribute("href").slice(1);
+    assert.equal(document.activeElement.getAttribute("id"), id);
+    assert.equal(nodes.get(id).getAttribute("tabindex"), "-1");
+    assert.equal(nodes.get(id).scrolled, true);
+    assert.equal(prevented, true);
+  }
+  for (const id of ["service-search", "service-state", "service-sort", "history-window", "refresh-now"]) {
+    assert.equal(nodes.get(id).isConnected, true);
+  }
+  assert.match(nodes.get("controls-compat").textContent, /Legacy.*fixed controls/);
+  assert.equal(requests.filter(url => url === "/api/actions" || url === "/api/action").length, 0);
+});
+
+test("DP3 row focus follows engine/full-ID, scope/unit and PID/start-ticks across real redraws", () => {
+  // Same names, cross-engine IDs, cross-scope units and reused PIDs must never steal an old target's focus.
+  for (const entry of identityCases) {
+    const app = application(), {nodes, context, document, requests} = app;
+    context.value = identityFixture();
+    vm.runInContext("render(value, receiptFixture());", context);
+    const original = inspectButton(app, entry.key);
+    original.focus();
+    vm.runInContext("render(value, receiptFixture());", context);
+    assert.equal(original.isConnected, false);
+    assert.equal(document.activeElement.getAttribute("data-target-key"), entry.key);
+    assert.equal(document.activeElement.isConnected, true);
+    entry.remove(context.value);
+    vm.runInContext("render(value, receiptFixture());", context);
+    assert.equal(document.activeElement.getAttribute("id"), entry.heading);
+    assert.equal(nodes.get(entry.heading).getAttribute("tabindex"), "-1");
+    assert.equal(requests.filter(url => url === "/api/action").length, 0);
+  }
+});
+
+test("DP3 close/Escape restore the actual matching opener or its section after identity removal", () => {
+  // A retained stale DOM node is not an opener; close must find the rebuilt exact identity, never a namesake.
+  for (const entry of identityCases) {
+    for (const close of ["button", "escape"]) {
+      const app = application(), {context, document, nodes, requests} = app;
+      context.value = identityFixture();
+      vm.runInContext("render(value, receiptFixture());", context);
+      inspectClick(inspectButton(app, entry.key));
+      assert.equal(document.activeElement.getAttribute("id"), "detail-close");
+      vm.runInContext("render(value, receiptFixture());", context);
+      assert.equal(document.activeElement.getAttribute("id"), "detail-close");
+      if (close === "button") nodes.get("detail-close").events.click();
+      else app.escapeDialog();
+      assert.equal(document.activeElement.getAttribute("data-target-key"), entry.key);
+      inspectClick(inspectButton(app, entry.key));
+      entry.remove(context.value);
+      vm.runInContext("render(value, receiptFixture());", context);
+      app.escapeDialog();
+      assert.equal(document.activeElement.getAttribute("id"), entry.heading);
+      vm.runInContext("runAction();", context);
+      assert.equal(requests.filter(url => url === "/api/action").length, 0);
+    }
+  }
+  for (const id of ["cleanup-details", "cleanup-run"]) {
+    const app = application();
+    app.context.value = maintenanceFixture();
+    vm.runInContext("render(value, receiptFixture());", app.context);
+    inspectClick(app.nodes.get(id));
+    app.escapeDialog();
+    assert.equal(app.document.activeElement.getAttribute("id"), id);
+    assert.equal(app.requests.filter(url => url === "/api/action").length, 0);
+  }
+});
+
+test("DP3 named dialog focuses Close then Cancel; Escape cancels only before dispatch", async () => {
+  // Drive actual listeners and POST guards: safe focus, Cancel/Escape zero, double Confirm one, no post-dispatch undo.
+  const app = await historyApplication(), {nodes, context, document, requests, pending} = app;
+  const opener = nodes.get("services").children[0].children[0].children[0];
+  inspectClick(opener);
+  assert.equal(nodes.get("detail-dialog").getAttribute("aria-labelledby"), "detail-title");
+  assert.equal(document.activeElement.getAttribute("id"), "detail-close");
+  let stop = nodes.get("action-controls").children.find(button => button.textContent === "Stop service");
+  stop.events.click({currentTarget: stop});
+  assert.equal(document.activeElement.getAttribute("id"), "action-cancel");
+  assert.match(nodes.get("action-question").textContent, /fixture-worker\.service \(user\)/);
+  nodes.get("action-cancel").events.click();
+  assert.equal(document.activeElement.getAttribute("data-action"), "stop");
+  stop.events.click({currentTarget: stop});
+  app.escapeDialog();
+  assert.equal(document.activeElement.getAttribute("data-target-key"), "service:user:fixture-worker.service");
+  vm.runInContext("runAction();", context);
+  assert.equal(requests.filter(url => url === "/api/action").length, 0);
+  inspectClick(inspectButton(app, "service:user:fixture-worker.service"));
+  stop = nodes.get("action-controls").children.find(button => button.textContent === "Stop service");
+  stop.events.click({currentTarget: stop});
+  nodes.get("action-run").focus();
+  nodes.get("action-run").events.click();
+  nodes.get("action-run").events.click();
+  assert.equal(app.escapeDialog().defaultPrevented, true);
+  assert.equal(nodes.get("detail-dialog").open, true);
+  assert.equal(requests.filter(url => url === "/api/action").length, 1);
+  pending.shift()(snapshotResponse({ok: true, action_id: "c".repeat(32), message: "Fixture stop completed.",
+    observation: recoveryServiceState("inactive")}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(document.activeElement.getAttribute("id"), "detail-close");
+  assert.equal(nodes.get("action-controls").children.some(button => button.textContent === "Start service"), true);
+  const start = nodes.get("action-controls").children.find(button => button.textContent === "Start service");
+  start.events.click({currentTarget: start});
+  vm.runInContext("delete snapshot.actions.service_actions; render(snapshot, receiptFixture());", context);
+  nodes.get("action-run").focus();
+  nodes.get("action-run").events.click();
+  assert.equal(document.activeElement.getAttribute("id"), "detail-close");
+  assert.equal(requests.filter(url => url === "/api/action").length, 1);
+});
+
+for (const failure of ["HTTP", "JSON"]) {
+  test(`DP3 failed paused manual ${failure} read retains dated values and requires Refresh/Resume`, async () => {
+    // Paused errors must not advertise a nonexistent retry or renew old server-relative receipt evidence.
+    const app = application(), {nodes, context, pending, timers} = app;
+    const value = maintenanceFixture();
+    value.filesystems = [{mount: "/", available_bytes: 1000, total_bytes: 2000, used_percent: 50}];
+    pending.shift()(snapshotResponse(value));
+    await new Promise(resolve => setImmediate(resolve));
+    const receipt = vm.runInContext("snapshotReceipt", context);
+    nodes.get("live-toggle").events.click();
+    nodes.get("refresh-now").events.click();
+    pending.shift()(failure === "HTTP" ? {ok: false, status: 503} :
+      {ok: true, status: 200, json: async () => { throw new Error("Fixture snapshot decode gap"); }});
+    await new Promise(resolve => setImmediate(resolve));
+    assert.match(nodes.get("notice").textContent, /Retaining.*dated.*Paused.*Refresh now.*Resume updates/);
+    assert.doesNotMatch(nodes.get("notice").textContent, /retrying automatically/i);
+    assert.equal(nodes.get("disk-free").textContent, "1000 B");
+    assert.equal(vm.runInContext("snapshotReceipt", context), receipt);
+    assert.equal(vm.runInContext("snapshot", context), value);
+    assert.equal(vm.runInContext("paused", context), true);
+    assert.equal(nodes.get("live-toggle").getAttribute("aria-pressed"), "true");
+    assert.equal(timers.size, 0);
+    nodes.get("refresh-now").events.click();
+    pending.shift()(snapshotResponse({...value, host: "manual recovery"}));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(vm.runInContext("paused", context), true);
+    assert.equal(timers.size, 0);
+  });
+}
+
+test("DP3 discarded automatic snapshot failure cannot publish over a frozen paused view", async () => {
+  // An automatic response finishing after Pause is not a manual error and cannot replace frozen status or evidence.
+  const app = application(), {nodes, context, pending} = app;
+  pending.shift()(snapshotResponse(maintenanceFixture()));
+  await new Promise(resolve => setImmediate(resolve));
+  automaticSnapshot(app);
+  nodes.get("live-toggle").events.click();
+  const notice = nodes.get("notice").textContent, receipt = vm.runInContext("snapshotReceipt", context);
+  pending.shift()({ok: false, status: 503});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(nodes.get("notice").textContent, notice);
+  assert.equal(nodes.get("connection").textContent, "Paused");
+  assert.equal(vm.runInContext("snapshotReceipt", context), receipt);
+});
+
+test("DP3 historical detail fields remain separate from receipts and exact observations while paused", async () => {
+  // Fresh post-state can authorize retained Start without relabelling old snapshot fields as current or resuming polling.
+  const app = await historyApplication(), {nodes, context, pending, requests, timers} = app;
+  inspectClick(nodes.get("services").children[0].children[0].children[0]);
+  const historical = nodes.get("detail-observed").textContent;
+  assert.match(historical, /Historical snapshot details.*fixed until reopened/);
+  assert.equal(nodes.get("detail-current").hidden, true);
+  nodes.get("live-toggle").events.click();
+  const stop = nodes.get("action-controls").children.find(button => button.textContent === "Stop service");
+  stop.events.click({currentTarget: stop});
+  nodes.get("action-run").events.click();
+  pending.shift()(snapshotResponse({ok: true, action_id: "d".repeat(32), message: "Fixture stop completed.",
+    observation: recoveryServiceState("inactive")}));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(nodes.get("action-result").textContent, /Request receipt.*Fixture stop completed/);
+  assert.equal(nodes.get("detail-current").hidden, false);
+  assert.match(nodes.get("detail-current").textContent, /Exact post-attempt state: inactive; server read.*not application health/i);
+  assert.equal(nodes.get("detail-observed").textContent, historical);
+  assert.match(nodes.get("detail-fields").textContent, /Stateactive/);
+  pending.shift()(snapshotResponse(actionHistoryFixture([])));
+  const updated = recoveryFixture(); updated.user_services.items = [];
+  pending.shift()(snapshotResponse(updated));
+  await new Promise(resolve => setImmediate(resolve));
+  pending.shift()(snapshotResponse(actionHistoryFixture([])));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(nodes.get("detail-observed").textContent, historical);
+  assert.equal(nodes.get("action-controls").children.some(button => button.textContent === "Start service"), true);
+  assert.equal(vm.runInContext("paused", context), true);
+  assert.equal(timers.size, 0);
+  assert.equal(requests.filter(url => url === "/api/action").length, 1);
+});
+
+test("DP3 storage explains only cached coverage, budgets and protection; missing remains unknown", () => {
+  // Cached categories are not an attribution/reclaim calculation; missing policy lists cannot imply safety or zero.
+  const {nodes, context, requests} = application();
+  context.value = maintenanceFixture();
+  context.value.filesystems = [{mount: "/", available_bytes: 1000, total_bytes: 2000, used_percent: 50}];
+  Object.assign(context.value.janitor.maintenance, {mode: "run", caches: [{
+    path: "/fictional/cache", kind: "shared", bytes: 128, budget_bytes: 256,
+    active: true, eligible: false, reason: "active_build",
+  }], workspaces: [{path: "/fictional/work", status: "protected_dirty"}]});
+  vm.runInContext("render(value, receiptFixture());", context);
+  let fields = nodes.get("storage-summary").textContent;
+  assert.match(fields, /maintenance-last\.json.*server-relative/);
+  assert.match(fields, /1 cache record.*1 workspace record/);
+  assert.match(nodes.get("storage-caches").textContent, /128 B.*256 B.*active true.*eligible false.*active_build/);
+  assert.match(nodes.get("protected").textContent, /protected_dirty/);
+  assert.match(nodes.get("storage-explanation").textContent, /budget is not.*permission/i);
+  assert.match(nodes.get("storage-explanation").textContent, /previously reclaimed.*not.*reclaim.*again/i);
+  assert.match(nodes.get("storage-explanation").textContent, /root.*separate.*never add or subtract/i);
+  assert.equal(nodes.get("disk-free").textContent, "1000 B");
+  const saved = context.value.janitor.maintenance;
+  for (const key of ["generated_at", "caches", "workspaces", "cache_budget_bytes", "cache_bytes"]) delete saved[key];
+  vm.runInContext("render(value, receiptFixture());", context);
+  fields = nodes.get("storage-summary").textContent;
+  assert.match(fields, /Cache observation ageUnknown.*Saved coverageUnknown.*Soft cache budgetUnknown/);
+  assert.match(nodes.get("storage-caches").textContent, /unknown.*no saved list/i);
+  assert.match(nodes.get("protected").textContent, /unknown.*no saved list/i);
+  assert.equal(nodes.get("cache").textContent, "Unknown");
+  assert.equal(requests.filter(url => url !== "/api/snapshot").length, 0);
 });

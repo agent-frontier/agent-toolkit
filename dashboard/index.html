@@ -22,10 +22,19 @@
     </form>
     <p id="notice" role="status" aria-live="polite" hidden></p>
     <div id="content" hidden>
+      <nav class="section-nav" aria-label="Jump to a section">
+        <a href="#maintenance-heading" data-section-jump="maintenance-heading">Maintenance</a>
+        <a href="#containers-heading" data-section-jump="containers-heading">Containers</a>
+        <a href="#services-heading" data-section-jump="services-heading">Services</a>
+        <a href="#storage-heading" data-section-jump="storage-heading">Storage</a>
+        <a href="#processes-heading" data-section-jump="processes-heading">Processes</a>
+        <a href="#history-heading" data-section-jump="history-heading">Chart</a>
+      </nav>
       <div class="toolbar">
         <div class="filters"><button id="refresh-now" type="button">Refresh now</button><button id="live-toggle" type="button" class="secondary" aria-pressed="false">Pause updates</button></div>
         <p id="live-status" class="muted" role="status">Live updates every 5 seconds</p><span id="controls-status" class="badge">Read-only</span>
       </div>
+      <p id="controls-compat" class="muted"></p>
       <section class="cards" aria-label="Server overview">
         <article class="card"><p class="eyebrow">ROOT DISK</p><strong id="disk-free">--</strong><p id="disk-detail" class="muted">Available space</p><meter id="disk-meter" max="100" aria-label="Root disk usage"></meter></article>
         <article class="card"><p class="eyebrow">CPU</p><strong id="cpu">--</strong><p id="load" class="muted">Sampling load</p><meter id="cpu-meter" max="100" aria-label="CPU usage"></meter></article>
@@ -35,34 +44,36 @@
         <article class="card"><p class="eyebrow">UPTIME</p><strong id="uptime">--</strong><p id="swap" class="muted">Swap usage</p></article>
       </section>
       <section class="panel trend">
-        <div class="section-heading"><div><p class="eyebrow">RECENT HISTORY</p><h2>Recent observations</h2></div><div class="filters"><p class="muted"><span class="cpu-key">CPU</span> / <span class="memory-key">RAM</span> / <span class="disk-key">Disk</span></p><label class="sr-only" for="history-window">Chart time range</label><select id="history-window"><option value="0">All collected</option><option value="5">Last 5 minutes</option><option value="15">Last 15 minutes</option><option value="30">Last 30 minutes</option></select></div></div>
+        <div class="section-heading"><div><p class="eyebrow">RECENT HISTORY</p><h2 id="history-heading" tabindex="-1">Recent observations</h2></div><div class="filters"><p class="muted"><span class="cpu-key">CPU</span> / <span class="memory-key">RAM</span> / <span class="disk-key">Disk</span></p><label class="sr-only" for="history-window">Chart time range</label><select id="history-window"><option value="0">All collected</option><option value="5">Last 5 minutes</option><option value="15">Last 15 minutes</option><option value="30">Last 30 minutes</option></select></div></div>
         <svg id="chart" viewBox="0 0 1000 130" preserveAspectRatio="none" role="img" aria-label="CPU, memory and disk usage history"></svg>
         <p id="history-note" class="muted">History stays in memory; no metrics database grows on disk.</p>
       </section>
       <div class="columns">
-        <section class="panel"><div class="section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2>Janitor &amp; build guard</h2></div><span id="maintenance-status" class="badge">Unknown</span></div>
-          <dl id="maintenance-summary"></dl><div id="maintenance-actions"></div><div class="filters"><button id="cleanup-run" type="button" class="danger" hidden disabled>Run guarded cleanup</button><button id="cleanup-details" type="button" class="secondary">View last cleanup</button></div><p id="cleanup-policy" class="muted"></p><details><summary>Protected work &amp; deferred cleanup</summary><ul id="protected"></ul></details>
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2 id="maintenance-heading" tabindex="-1">Janitor &amp; build guard</h2></div><span id="maintenance-status" class="badge">Unknown</span></div>
+          <dl id="maintenance-summary"></dl><div id="maintenance-actions"></div><div class="filters"><button id="cleanup-run" type="button" class="danger" hidden disabled>Run guarded cleanup</button><button id="cleanup-details" type="button" class="secondary">View last cleanup</button></div><p id="cleanup-policy" class="muted"></p><details><summary>Saved protection &amp; deferral records</summary><ul id="protected"></ul></details>
         </section>
-        <section class="panel"><div class="section-heading"><div><p class="eyebrow">STORAGE</p><h2>Mounted filesystems</h2></div></div><div class="table-wrap"><table><thead><tr><th>Mount</th><th>Available</th><th>Used</th><th>Inodes</th></tr></thead><tbody id="filesystems"></tbody></table></div>
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">STORAGE</p><h2 id="storage-heading" tabindex="-1">Mounted filesystems</h2></div></div><div class="table-wrap identity-table"><table><thead><tr><th>Mount</th><th>Available</th><th>Used</th><th>Inodes</th></tr></thead><tbody id="filesystems"></tbody></table></div>
+          <h3>Cached cleanup context</h3><dl id="storage-summary"></dl><ul id="storage-caches"></ul>
+          <p id="storage-explanation" class="muted">A soft budget is not deletion permission or an estimate of reclaimable bytes. Previously reclaimed bytes are not available to reclaim again. Root free space and artifact deletion metrics are separate; never add or subtract these overlapping categories. Saved lists are not complete disk attribution. Maintenance shows separately dated budget/native results and unit execution.</p>
           <h3>Network throughput</h3><div id="network" class="table-wrap"></div>
         </section>
       </div>
-      <section class="panel"><div class="section-heading"><div><p class="eyebrow">SERVICE INVENTORY</p><h2>What is running</h2></div><div class="filters"><label class="sr-only" for="service-search">Filter services</label><input id="service-search" placeholder="Search services..." type="search"><label class="sr-only" for="service-state">Service state</label><select id="service-state"><option value="live">Active + failed</option><option value="all">All loaded</option><option value="failed">Failed only</option></select><label class="sr-only" for="service-sort">Service sort order</label><select id="service-sort"><option value="state">Failed first</option><option value="name">Name</option><option value="scope">Scope</option></select></div></div>
+      <section class="panel"><div class="section-heading"><div><p class="eyebrow">SERVICE INVENTORY</p><h2 id="services-heading" tabindex="-1">What is running</h2></div><div class="filters"><label class="sr-only" for="service-search">Filter services</label><input id="service-search" placeholder="Search services..." type="search"><label class="sr-only" for="service-state">Service state</label><select id="service-state"><option value="live">Active + failed</option><option value="all">All loaded</option><option value="failed">Failed only</option></select><label class="sr-only" for="service-sort">Service sort order</label><select id="service-sort"><option value="state">Failed first</option><option value="name">Name</option><option value="scope">Scope</option></select></div></div>
         <p id="services-note" class="muted">System and user scopes are listed separately.</p>
-        <div class="table-wrap service-table"><table><thead><tr><th>Service</th><th>Scope</th><th>State</th><th>Description</th></tr></thead><tbody id="services"></tbody></table></div>
+        <div class="table-wrap service-table identity-table"><table><thead><tr><th>Service</th><th>Scope</th><th>State</th><th>Description</th></tr></thead><tbody id="services"></tbody></table></div>
       </section>
       <div class="columns">
-        <section class="panel"><div class="section-heading"><div><p class="eyebrow">RESOURCE CONSUMERS</p><h2>Top processes</h2></div></div><p id="process-note" class="muted">CPU is per process; command arguments and environments are never read.</p>
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">RESOURCE CONSUMERS</p><h2 id="processes-heading" tabindex="-1">Top processes</h2></div></div><p id="process-note" class="muted">CPU is per process; command arguments and environments are never read.</p>
           <div class="filters list-controls"><label class="sr-only" for="process-search">Filter displayed processes</label><input id="process-search" type="search" placeholder="Process name or PID..."><label class="sr-only" for="process-sort">Sort displayed process sample</label><select id="process-sort"><option value="cpu">CPU</option><option value="memory">RAM (displayed sample)</option><option value="name">Name</option></select></div>
-          <div class="table-wrap"><table><thead><tr><th>Process</th><th>PID</th><th>CPU</th><th>RAM</th></tr></thead><tbody id="processes"></tbody></table></div>
+          <div class="table-wrap identity-table"><table><thead><tr><th>Process</th><th>PID</th><th>CPU</th><th>RAM</th></tr></thead><tbody id="processes"></tbody></table></div>
         </section>
-        <section class="panel"><div class="section-heading"><div><p class="eyebrow">CONTAINERS</p><h2>Docker &amp; Podman</h2></div></div><div class="filters list-controls"><label class="sr-only" for="container-search">Filter containers</label><input id="container-search" type="search" placeholder="Container name or image..."><label class="sr-only" for="container-engine">Container engine</label><select id="container-engine"><option value="all">Both engines</option><option value="docker">Docker</option><option value="podman">Podman</option></select><label class="sr-only" for="container-state">Container state</label><select id="container-state"><option value="all">All states</option><option value="running">Running</option><option value="stopped">Not running</option></select></div><div id="containers"></div></section>
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">CONTAINERS</p><h2 id="containers-heading" tabindex="-1">Docker &amp; Podman</h2></div></div><div class="filters list-controls"><label class="sr-only" for="container-search">Filter containers</label><input id="container-search" type="search" placeholder="Container name or image..."><label class="sr-only" for="container-engine">Container engine</label><select id="container-engine"><option value="all">Both engines</option><option value="docker">Docker</option><option value="podman">Podman</option></select><label class="sr-only" for="container-state">Container state</label><select id="container-state"><option value="all">All states</option><option value="running">Running</option><option value="stopped">Not running</option></select></div><div id="containers"></div></section>
       </div>
       <section id="actions-panel" class="panel" hidden><h2>Recent action receipts</h2><p id="actions-quality" class="muted" role="status">History not read yet.</p><p id="unlinked-attempt" role="status" hidden></p><ul id="recent-actions"></ul></section>
       <section id="errors-panel" class="panel" hidden><h2>Observation gaps</h2><p class="muted">Unavailable data is not a healthy zero.</p><ul id="errors"></ul></section>
     </div>
   </main>
-  <dialog id="detail-dialog"><div class="section-heading"><h2 id="detail-title">Details</h2><button id="detail-close" type="button" class="secondary">Close</button></div><p id="detail-observed" class="muted"></p><dl id="detail-fields"></dl><p id="detail-policy" class="muted">Read-only unless homelab controls are enabled.</p><div id="action-controls" class="filters" hidden></div><div id="action-confirm" hidden><p id="action-question"></p><div class="filters"><button id="action-run" type="button" class="danger">Confirm action</button><button id="action-cancel" type="button" class="secondary">Cancel</button></div></div><p id="action-result" role="status" aria-live="polite"></p></dialog>
+  <dialog id="detail-dialog" aria-labelledby="detail-title"><div class="section-heading"><h2 id="detail-title">Details</h2><button id="detail-close" type="button" class="secondary" autofocus>Close</button></div><p id="detail-observed" class="muted"></p><dl id="detail-fields"></dl><p id="detail-current" class="exact-observation" hidden></p><p id="detail-policy" class="muted">Read-only unless homelab controls are enabled.</p><div id="action-controls" class="filters" hidden></div><div id="action-confirm" hidden><p id="action-question"></p><div class="filters"><button id="action-run" type="button" class="danger">Confirm action</button><button id="action-cancel" type="button" class="secondary">Cancel</button></div></div><p id="action-result" role="status" aria-live="polite"></p></dialog>
   <footer>Observer mode by default; optional homelab controls. Restricted localhost or LAN HTTPS access. No third-party assets or telemetry.</footer>
 </body>
 </html>
