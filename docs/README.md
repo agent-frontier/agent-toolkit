@@ -38,6 +38,7 @@ on-disk shape is documented in
 | [cert-watch-install.md](./cert-watch-install.md) | Hourly certificate checks, target configuration and verification |
 | [log-shipper-install.md](./log-shipper-install.md) | Quarter-hour audit export, output configuration and verification |
 | [cron-troubleshooting.md](./cron-troubleshooting.md) | All four schedules, launcher status, startup failures and stale runs |
+| [dashboard.md](./dashboard.md) | Optional homelab web UI: observer-default monitoring, guarded cleanup and fixed current-user workload controls over localhost or private-LAN HTTPS |
 
 ## For autonomous agents
 
@@ -56,6 +57,7 @@ on-disk shape is documented in
 | Doc | What's in it |
 |---|---|
 | [audit-trail.md](./audit-trail.md) | JSONL event shape, status enum, `last-run.json` v0.2 schema — the on-disk contract both tracks build on |
+| [Dashboard audit records](./audit/README.md) | Dashboard access, controls, UX and implementation-review evidence |
 
 ## Cross-references
 

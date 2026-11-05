@@ -311,11 +311,26 @@ replays a mutation.
 With controls enabled, **Run guarded cleanup** opens the same named Maintenance
 detail/confirmation flow. Cancel sends no request; repeated Confirm taps send
 only one. It schedules only the already-installed
-`system-janitor-catchup.service` for the dashboard's user. No new unit installation
-or wrapper changes are needed; the existing guard's eligibility, leases, locks,
+`system-janitor-catchup.service` for the dashboard's user. An existing runner needs
+no wrapper changes; the guard's eligibility, leases, locks,
 budgets, cooldown and native Janitor phase remain unchanged. Busy work can defer,
 and a real check can legitimately reclaim zero bytes. There is no force mode,
 bare Janitor sweep, arbitrary unit/path/mode or root fallback.
+
+Dashboard installation **does not install this optional guarded runner**.
+Without an independently installed, usable runner, cleanup stays unavailable;
+the dashboard does not provision a replacement or bypass its protections.
+To investigate a disabled cleanup control, inspect its user-manager facts:
+
+```bash
+systemctl --user show --no-pager \
+  --property=Id,LoadState,ActiveState,SubState,CanStart,RefuseManualStart \
+  -- system-janitor-catchup.service
+```
+
+`LoadState=loaded` alone is not permission to run. The dashboard also checks
+canonical identity, manual-start policy and fresh state. Failed or malformed
+reads remain explicitly unknown, never a fallback cleanup.
 
 The fixed `POST /api/action` accepts exactly:
 
@@ -379,8 +394,9 @@ inactivity timeout that resets on each byte. Inventory and exact container post-
 two-second total transport budget. Unexpected mutation statuses are rejected
 without reading their response bodies.
 
-Private `dashboard-actions.jsonl` under
-`~/.local/state/agent-toolkit/` records an action ID, sanitized target,
+Private `$XDG_STATE_HOME/agent-toolkit/dashboard-actions.jsonl` (default
+`$HOME/.local/state/agent-toolkit/dashboard-actions.jsonl` when the variable is
+unset) records an action ID, sanitized target,
 started event and succeeded/failed/unknown outcome; cleanup receipts instead
 use accepted/observed (or failed/unknown), never a cleanup-completed claim.
 It rotates at 5MiB with eight
