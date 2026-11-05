@@ -144,6 +144,14 @@ It can only observe what its unprivileged user can access. It does not publish
 source, loosen [maintenance protections](cron-troubleshooting.md), or change
 the five-minute Janitor timer.
 
+Maintenance also observes the current user's fixed
+`system-janitor-catchup.service` in a separate two-second, exact-unit read:
+load state, canonical ID, active/substate, result, integer exit status,
+invocation ID and server read timestamp. Missing optional installation is
+**unavailable**, not a healthy zero. Failed, incomplete or malformed unit reads
+are visible observation gaps, while saved maintenance/native records retain
+their own dates. Timer and service state are separate.
+
 Containers are queried with fixed, read-only `GET /containers/json?all=1` requests
 over an existing local Unix socket, not privileged/Snap container launchers.
 Docker checks the user's runtime socket and `/var/run/docker.sock`; Podman uses
@@ -175,7 +183,8 @@ Docker/Podman filters include created and stopped containers.
 Chart ranges are relative to the most recent observation, including while paused.
 
 Tap a service, process or container name for dated snapshot details, or
-**View last cleanup** for the native Janitor result. These are inspection controls
+**Maintenance details** for the named runner and separately dated budget/native
+Janitor results (**View last cleanup** on older backends). These are inspection controls
 only while controls are disabled. All detail text is rendered as text, not HTML.
 
 ## Homelab Stop / Kill / Remove
@@ -199,6 +208,68 @@ Tap an item, choose its action, then confirm the exact named target:
   this dashboard, the disk guard and protected infrastructure stay view-only.
   No root service privileges are granted.
 
+### Run guarded cleanup
+
+With controls enabled, **Run guarded cleanup** opens the same named Maintenance
+detail/confirmation flow. Cancel sends no request; repeated Confirm taps send
+only one. It schedules only the already-installed
+`system-janitor-catchup.service` for the dashboard's user. No new unit installation
+or wrapper changes are needed; the existing guard's eligibility, leases, locks,
+budgets, cooldown and native Janitor phase remain unchanged. Busy work can defer,
+and a real check can legitimately reclaim zero bytes. There is no force mode,
+bare Janitor sweep, arbitrary unit/path/mode or root fallback.
+
+The fixed `POST /api/action` accepts exactly:
+
+```json
+{"kind":"cleanup","action":"run"}
+```
+
+It freshly verifies the canonical loaded, unmasked, manually startable user unit,
+then issues only `systemctl --user start --no-block -- system-janitor-catchup.service`
+with the existing 12-second command bound. An active/activating/deactivating
+runner (also reloading/refreshing) is observed without dispatching another start.
+Missing, masked, unusable and unknown state is explicit. The same current
+CIDR, Host/Origin, authentication-policy, nonce, JSON/body and shared action
+serialization gates apply.
+
+Cleanup success includes boolean `dispatch_only: true`, a `dispatch` receipt
+(`status: "accepted"` with `dispatched: true`, or `"already_running"` with
+`dispatched: false`), and a separate fresh `observation` containing the unit
+fields above. `completed_at` dates the API attempt, **not cleanup completion**.
+Scheduling acceptance is not reclamation. A timeout after launch, lost outcome
+audit or failed post-launch observation is **unknown**, even when scheduling was
+accepted; inspect/refresh unit state rather than automatically replaying.
+Signal-terminated scheduling helpers also leave scheduling unknown, not rejected,
+even when a fresh read observes the runner activating. Undecodable unit output
+is a dated malformed observation gap: before launch it blocks dispatch; after
+accepted scheduling it returns JSON unknown and an unknown audit outcome.
+
+The live runner badge takes precedence over an old cached `cleaned` result.
+A finished unit observation describes that invocation only, not application
+health or guaranteed reclaimed bytes. The producer's optional
+`service_invocation_id` is a validated 32-hex `INVOCATION_ID` (otherwise null/
+unverified). `janitor.maintenance_phase_linked` is true only for equal nonempty
+verified service/phase IDs. Linked saved results describe the **budget phase
+only**: the wrapper may still be running native Janitor. Legacy, missing and
+mismatched IDs remain dated/unlinked results; native Janitor outcomes remain
+separate. Removed artifact bytes and concurrent observed free-space change
+are displayed separately, never added into a guaranteed reclaim total.
+
+New assets require the approved `actions.cleanup` metadata (fixed kind/action,
+unit, user scope and boolean dispatch-only marker), both action capabilities,
+and a fresh loaded service observation before offering or posting cleanup.
+Freshness uses the authoritative HTTP `Date` header plus locally elapsed
+monotonic time, never a comparison with the phone's wall clock. Header precision,
+request transit and parsing delay count conservatively against the existing
+stale limit for both the cached snapshot and unit read. Missing/invalid server
+age evidence is explicitly unknown. Paused views retain their displayed
+receipt; discarded responses cannot refresh it or make old observations fresh.
+An older backend without that metadata retains legacy viewing and workload
+controls; it never receives an unsupported cleanup request.
+
+### Shared action safeguards
+
 Actions use one fixed JSON POST endpoint with source CIDR, Host/Origin,
 authentication-policy and per-server nonce checks. Cross-site forms, arbitrary
 commands, signal numbers, paths and raw container API forwarding are rejected.
@@ -212,7 +283,9 @@ without reading their response bodies.
 
 Private `dashboard-actions.jsonl` under
 `~/.local/state/agent-toolkit/` records an action ID, sanitized target,
-started event and succeeded/failed/unknown outcome. It rotates at 5MiB with eight
+started event and succeeded/failed/unknown outcome; cleanup receipts instead
+use accepted/observed (or failed/unknown), never a cleanup-completed claim.
+It rotates at 5MiB with eight
 backups; tokens, nonces, environments and command arguments are never logged.
 Failure to write the initial `started` record prevents dispatch. If writing the
 outcome fails after an attempt, the action may already have completed while the
@@ -235,7 +308,9 @@ writing state: exit 0 for healthy collection, 4 for source-observation errors
 (including unsupported source configuration or denied socket access).
 Here, **healthy describes collection, not host health or complete visibility**:
 missing first-run records and absent optional engine sockets stay unknown and
-do not alone make collection degraded. Invalid CLI arguments, token
+do not alone make collection degraded; a missing optional guarded service is
+likewise explicitly unavailable. Failed unit-state reads do degrade collection.
+Invalid CLI arguments, token
 configuration and startup errors exit 3. `GET /api/snapshot` returns the cached
 JSON with `Authorization: Bearer TOKEN`; missing/invalid auth returns 401,
 foreign Host/Origin returns 403, warming-up returns 503, and mutation methods
@@ -246,6 +321,9 @@ override them. `--url` reads the same profile and prints the configured scheme,
 address and port, so phones do not receive a stale localhost link. If overriding
 the service port on its command line, use the same `--port` with `--url` and any
 tunnel. Discovery retains the default-loopback capability and adds `lan-https`.
+Version `0.6.0` additionally advertises `guarded-cleanup` and `cleanup-job-state`
+in the alphabetically sorted, append-only capability list; read-only/default
+capability strings and observer defaults are retained.
 
 To rotate a token, stop the service, move its private token file to a private
 backup, rerun `--init`, and restart. Existing browser sessions will need the new

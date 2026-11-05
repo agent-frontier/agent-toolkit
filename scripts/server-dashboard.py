@@ -28,10 +28,10 @@ import time
 from urllib.parse import urlsplit
 
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 LIMIT = 2 * 1024 * 1024
 ASSETS = Path(__file__).resolve().parent.parent / "dashboard"
-CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "container-inventory-all", "control-actions", "interactive-view", "lan-https", "loopback-only",
+CAPABILITIES = sorted(["authenticated-http", "cached-snapshot", "cleanup-job-state", "container-inventory-all", "control-actions", "guarded-cleanup", "interactive-view", "lan-https", "loopback-only",
                        "read-only", "snapshot-json", "systemd-services", "trusted-lan-readonly"])
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
@@ -449,12 +449,24 @@ class Collector:
         ):
             result[name] = read_state(path)
         result["maintenance"] = validate_maintenance(result["maintenance"])
-        result["timer"] = dict(
-            line.split("=", 1) for line in command([
-                "systemctl", "--user", "show", "system-janitor-catchup.timer",
-                "-p", "ActiveState", "-p", "NextElapseUSecRealtime", "-p", "LastTriggerUSec",
-            ]).splitlines() if "=" in line
+        actions = action_module()
+        result["service"] = actions.user_unit_state(actions.CLEANUP_UNIT)
+        saved_id = (result["maintenance"] or {}).get("service_invocation_id")
+        result["maintenance_phase_linked"] = (
+            type(saved_id) is str and re.fullmatch(r"[0-9a-f]{32}", saved_id) is not None
+            and result["service"]["status"] == "available"
+            and saved_id == result["service"]["invocation_id"]
         )
+        try:
+            result["timer"] = dict(
+                line.split("=", 1) for line in command([
+                    "systemctl", "--user", "show", "system-janitor-catchup.timer",
+                    "-p", "ActiveState", "-p", "NextElapseUSecRealtime", "-p", "LastTriggerUSec",
+                ]).splitlines() if "=" in line
+            )
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            result["timer"] = None
+            result["timer_error"] = str(error)[:240]
         return result
 
     def collect(self):
@@ -481,6 +493,11 @@ class Collector:
             "janitor": observe("janitor", self.maintenance),
             "errors": errors,
         }
+        janitor = snapshot["janitor"] or {}
+        if (janitor.get("service") or {}).get("status") == "unknown":
+            errors.append({"source": "janitor_service", "detail": janitor["service"]["detail"]})
+        if janitor.get("timer_error"):
+            errors.append({"source": "janitor_timer", "detail": janitor["timer_error"]})
         self.previous_time = now
         snapshot["status"] = "degraded" if errors else "healthy"
         system = snapshot["system"] or {}
@@ -655,8 +672,8 @@ def handler_for(snapshot, token, controls=None):
                 result = controls.execute(payload)
             except action_module().ActionError as error:
                 return self.respond(error.status, json.dumps(
-                    {"ok": False, "error": str(error), "outcome": error.outcome},
-                    ensure_ascii=True,
+                    {"ok": False, "error": str(error), "outcome": error.outcome, **error.details},
+                    ensure_ascii=True, allow_nan=False,
                 ).encode())
             self.respond(200, json.dumps(result, ensure_ascii=True, allow_nan=False).encode())
 

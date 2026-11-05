@@ -26,6 +26,18 @@ d = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(d)
 IDENTIFIER = "a" * 64
 UNIT = "smith-worker@demo.service"
+INVOCATION = "b" * 32
+
+
+def unit_response(**changes):
+    properties = {
+        "Id": d.CLEANUP_UNIT, "LoadState": "loaded", "ActiveState": "inactive",
+        "SubState": "dead", "Result": "success", "ExecMainStatus": "0",
+        "InvocationID": "", "CanStart": "yes", "RefuseManualStart": "no",
+    }
+    properties.update(changes)
+    return SimpleNamespace(returncode=0, stdout="".join(
+        f"{key}={value}\n" for key, value in properties.items()), stderr="")
 
 
 class ActionTests(unittest.TestCase):
@@ -42,6 +54,7 @@ class ActionTests(unittest.TestCase):
         self.controller = self.controller_at(self.root / "state")
         self.container = {"kind": "container", "engine": "podman", "id": IDENTIFIER, "action": "stop"}
         self.service = {"kind": "service", "scope": "user", "unit": UNIT, "action": "stop"}
+        self.cleanup = {"kind": "cleanup", "action": "run"}
 
     def controller_at(self, path):
         return d.Controller(path, self.socket, self.inventory, self.services, self.wake)
@@ -146,6 +159,10 @@ class ActionTests(unittest.TestCase):
             dict(self.service, unit="--all.service"), dict(self.service, unit="a\n.service"),
             dict(self.service, unit="worker.timer"), dict(self.service, unit=[]),
             dict(self.service, action="restart"), dict(self.service, nonce="not accepted here"),
+            {"kind": "cleanup"}, dict(self.cleanup, action="force"),
+            dict(self.cleanup, action=[]), dict(self.cleanup, unit=d.CLEANUP_UNIT),
+            dict(self.cleanup, path="/tmp"), dict(self.cleanup, mode="run"),
+            dict(self.cleanup, scope="user"), dict(self.cleanup, nonce="not accepted here"),
         ]
         with mock.patch.object(d.subprocess, "run") as run:
             for payload in invalid:
@@ -159,10 +176,338 @@ class ActionTests(unittest.TestCase):
         manifest = self.controller.describe()
         self.assertEqual(manifest, {"enabled": True, "nonce": self.controller.nonce,
                                    "owner_uid": os.getuid(),
-                                   "protected_services": sorted(d.PROTECTED_SERVICES)})
+                                   "protected_services": sorted(d.PROTECTED_SERVICES),
+                                   "capabilities": ["cleanup-job-state", "guarded-cleanup"],
+                                   "cleanup": {"kind": "cleanup", "action": "run",
+                                               "unit": "system-janitor-catchup.service",
+                                               "scope": "user", "dispatch_only": True}})
         self.assertGreaterEqual(len(manifest["nonce"]), 43)
         self.assertNotEqual(manifest["nonce"], self.controller_at(self.root / "other").nonce)
         self.assertNotIn(UNIT, d.PROTECTED_SERVICES)
+
+    def test_user_unit_state_is_strict_typed_bounded_and_canonical(self):
+        # A reusable exact-target read must not turn malformed DBus values into zeroes.
+        with mock.patch.object(d.subprocess, "run", return_value=unit_response(
+                Id=UNIT, ExecMainStatus="7", InvocationID=INVOCATION.upper())) as run:
+            state = d.user_unit_state(UNIT)
+        run.assert_called_once_with(
+            ["systemctl", "--user", "show", "--no-pager",
+             "--property=Id,LoadState,ActiveState,SubState,Result,ExecMainStatus,InvocationID,CanStart,RefuseManualStart",
+             "--", UNIT], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            shell=False, timeout=2, check=False,
+        )
+        self.assertEqual(state["status"], "available")
+        self.assertEqual((state["unit"], state["id"], state["scope"]), (UNIT, UNIT, "user"))
+        self.assertEqual((state["load_state"], state["active"], state["sub"]),
+                         ("loaded", "inactive", "dead"))
+        self.assertEqual((state["result"], state["exit_status"]), ("success", 7))
+        self.assertIs(type(state["exit_status"]), int)
+        self.assertEqual(state["invocation_id"], INVOCATION)
+        self.assertTrue(state["can_start"])
+        self.assertFalse(state["refuse_manual_start"])
+        self.assertRegex(state["read_at"], r"Z$")
+        json.dumps(state, allow_nan=False)
+        for changes in (
+            {"Id": "../wrong.service"}, {"LoadState": "unknown"}, {"ActiveState": ""},
+            {"ActiveState": "mystery"}, {"SubState": "running\nbroken"}, {"Result": ""},
+            {"Result": "bad result"}, {"CanStart": "true"}, {"RefuseManualStart": ""},
+            *({"ExecMainStatus": value} for value in ("NaN", "inf", "1e400", "-1", "256", "", "1.5")),
+            *({"InvocationID": value} for value in ("bad", "b" * 31, "b" * 33, INVOCATION + "\n")),
+        ):
+            with self.subTest(changes=changes), mock.patch.object(
+                    d.subprocess, "run", return_value=unit_response(**changes)):
+                state = d.user_unit_state(d.CLEANUP_UNIT)
+                self.assertEqual(state["status"], "unknown")
+                self.assertEqual(state["error"], "malformed")
+                self.assertIsNone(state["exit_status"])
+                self.assertIsNone(state["invocation_id"])
+                self.assertTrue(state["detail"])
+        with mock.patch.object(d.subprocess, "run", return_value=unit_response(Id=UNIT)):
+            state = d.user_unit_state(d.CLEANUP_UNIT)
+        self.assertEqual(state["id"], UNIT)
+        self.assertEqual(state["status"], "unavailable")
+        with mock.patch.object(d.subprocess, "run") as run:
+            for unit in ("../a.service", "--all.service", "worker.timer", [], None):
+                with self.subTest(unit=unit), self.assertRaises(ValueError):
+                    d.user_unit_state(unit)
+            run.assert_not_called()
+
+    def test_user_unit_read_failures_and_incomplete_properties_are_visible(self):
+        # Failed/partial reads carry a dated gap, never a fabricated healthy exit.
+        good = unit_response()
+        malformed = [
+            good.stdout + "Id=duplicate.service\n", good.stdout + "Unrequested=yes\n",
+            "not a property\n", "", b"not text", "x" * (d.RESPONSE_LIMIT + 1),
+            *(good.stdout.replace(line + "\n", "") for line in good.stdout.splitlines()),
+        ]
+        for output in malformed:
+            with self.subTest(size=len(output)), mock.patch.object(d.subprocess, "run",
+                    return_value=SimpleNamespace(returncode=0, stdout=output)):
+                state = d.user_unit_state(d.CLEANUP_UNIT)
+                self.assertEqual((state["status"], state["error"]), ("unknown", "malformed"))
+        for failure in (
+            subprocess.TimeoutExpired("systemctl", 2, stderr="secret-timeout"),
+            OSError(errno.EACCES, "secret-read-error"),
+        ):
+            with self.subTest(failure=type(failure).__name__), mock.patch.object(
+                    d.subprocess, "run", side_effect=failure) as run:
+                state = d.user_unit_state(d.CLEANUP_UNIT)
+                self.assertEqual(state["status"], "unknown")
+                self.assertIsNone(state["exit_status"])
+                self.assertRegex(state["read_at"], r"Z$")
+                self.assertNotIn("secret-", json.dumps(state))
+                run.assert_called_once()
+        for code in (9, float("nan"), True):
+            with self.subTest(code=code), mock.patch.object(d.subprocess, "run",
+                    return_value=SimpleNamespace(returncode=code, stdout=good.stdout,
+                                                 stderr="secret-dbus-error")):
+                state = d.user_unit_state(d.CLEANUP_UNIT)
+                self.assertEqual((state["status"], state["error"]), ("unknown", "read_failed"))
+                self.assertNotIn("secret-", json.dumps(state))
+
+    def test_guarded_cleanup_fixed_dispatch_only_and_fresh_observation(self):
+        # Real action dispatch logic sees a fake unit transition, not a live host start.
+        started = False
+        def systemctl(args, **kwargs):
+            nonlocal started
+            self.assertEqual(self.events()[-1]["event"], "started")
+            self.assertEqual(self.events()[-1]["target"],
+                             {"scope": "user", "unit": d.CLEANUP_UNIT})
+            if args[2] == "show":
+                return unit_response(ActiveState="activating" if started else "inactive",
+                                     SubState="start" if started else "dead",
+                                     InvocationID=INVOCATION if started else "")
+            self.assertEqual(args, ["systemctl", "--user", "start", "--no-block",
+                                    "--", "system-janitor-catchup.service"])
+            self.assertEqual(kwargs, {
+                "stdin": subprocess.DEVNULL, "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL, "shell": False, "timeout": 12, "check": False,
+            })
+            started = True
+            return SimpleNamespace(returncode=0)
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+            result = self.controller.execute(self.cleanup)
+        self.assertEqual([call.args[0][2] for call in run.call_args_list], ["show", "start", "show"])
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["dispatch_only"])
+        self.assertEqual(result["dispatch"], {
+            "status": "accepted", "dispatched": True, "unit": d.CLEANUP_UNIT, "scope": "user",
+        })
+        self.assertEqual(result["observation"]["active"], "activating")
+        self.assertEqual(result["observation"]["invocation_id"], INVOCATION)
+        self.assertIn("dispatch only", result["message"])
+        self.assertIn("does not mean", result["message"])
+        self.assertEqual([event["event"] for event in self.events()], ["started", "accepted"])
+        self.assertEqual(self.events()[-1]["observation"], result["observation"])
+        self.assertTrue(all(event["action_id"] == result["action_id"] for event in self.events()))
+        self.assertEqual(stat.S_IMODE((self.controller.state_dir / d.AUDIT_NAME).stat().st_mode), 0o600)
+        self.assertNotIn(self.controller.nonce, json.dumps(self.events()))
+        self.services.assert_not_called()
+        self.socket.assert_not_called()
+        self.wake.assert_called_once_with()
+
+    def test_guarded_cleanup_busy_and_unusable_units_never_start(self):
+        # Busy, missing, masked, aliased and manually unstartable units have no fallback.
+        for active in ("active", "activating", "deactivating", "reloading", "refreshing"):
+            with self.subTest(active=active), mock.patch.object(d.subprocess, "run",
+                    return_value=unit_response(ActiveState=active, SubState="running",
+                                               InvocationID=INVOCATION)) as run:
+                result = self.controller.execute(self.cleanup)
+                self.assertEqual(result["dispatch"]["status"], "already_running")
+                self.assertFalse(result["dispatch"]["dispatched"])
+                self.assertEqual(result["observation"]["active"], active)
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.args[0][2], "show")
+                self.assertEqual(self.events()[-1]["event"], "observed")
+        for changes, status in (
+            ({"LoadState": "not-found", "Result": ""}, 404),
+            ({"LoadState": "masked", "Result": ""}, 503),
+            ({"LoadState": "error", "Result": ""}, 503),
+            ({"LoadState": "bad-setting"}, 503), ({"Id": UNIT}, 503),
+            ({"CanStart": "no"}, 503), ({"RefuseManualStart": "yes"}, 503),
+            ({"ActiveState": "maintenance"}, 503), ({"InvocationID": "malformed"}, 503),
+        ):
+            with self.subTest(changes=changes), mock.patch.object(d.subprocess, "run",
+                    return_value=unit_response(**changes)) as run:
+                error = self.error(self.cleanup, status)
+                self.assertFalse(error.details["dispatch"]["dispatched"])
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(run.call_args.args[0][2], "show")
+        self.assertEqual(self.wake.call_count, 14)
+        self.services.assert_not_called()
+        self.inventory.assert_not_called()
+
+    def test_guarded_cleanup_launch_and_post_launch_gaps_never_retry(self):
+        # Accepted dispatch plus an unreadable runner is unknown, not completed cleanup.
+        cases = (
+            ("launch-timeout", 504, "unknown"), ("launch-error", 503, "failed"),
+            ("rejected", 502, "failed"), ("read-timeout", 504, "unknown"),
+            ("malformed", 503, "unknown"), ("disappeared", 503, "unknown"),
+        )
+        for name, status, outcome in cases:
+            with self.subTest(case=name):
+                controller = self.controller_at(self.root / name)
+                reads = 0
+                def systemctl(args, **kwargs):
+                    nonlocal reads
+                    if args[2] == "show":
+                        reads += 1
+                        if reads > 1:
+                            if name == "read-timeout":
+                                raise subprocess.TimeoutExpired("systemctl", 2, stderr="secret-state")
+                            if name == "malformed":
+                                return unit_response(ExecMainStatus="NaN")
+                            if name == "disappeared":
+                                return unit_response(LoadState="not-found", Result="")
+                        return unit_response()
+                    self.assertEqual(args, ["systemctl", "--user", "start", "--no-block", "--", d.CLEANUP_UNIT])
+                    if name == "launch-timeout":
+                        raise subprocess.TimeoutExpired("systemctl", 12, stderr="secret-launch")
+                    if name == "launch-error":
+                        raise OSError(errno.EACCES, "secret-launch")
+                    return SimpleNamespace(returncode=7 if name == "rejected" else 0,
+                                           stderr="secret-daemon")
+                with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+                    error = self.error(self.cleanup, status, outcome, controller)
+                self.assertEqual(sum(call.args[0][2] == "start" for call in run.call_args_list), 1)
+                self.assertTrue(error.details["dispatch_only"])
+                self.assertNotIn("secret-", json.dumps(self.events(controller)))
+                self.assertEqual(self.events(controller)[-1]["event"], outcome)
+                if name in {"read-timeout", "malformed", "disappeared"}:
+                    self.assertEqual(error.details["dispatch"]["status"], "accepted")
+                    self.assertNotEqual(error.details["observation"]["status"], "available")
+        self.assertEqual(self.wake.call_count, len(cases))
+
+    def test_guarded_cleanup_private_audit_and_shared_serialization(self):
+        # Cleanup inherits both locks and cannot dispatch without durable private intent.
+        with mock.patch.object(d.os, "write", side_effect=OSError(errno.ENOSPC, "full")), \
+                mock.patch.object(d.subprocess, "run") as run:
+            self.error(self.cleanup, 500)
+            run.assert_not_called()
+        self.wake.assert_not_called()
+        other = self.controller_at(self.controller.state_dir)
+        def systemctl(args, **kwargs):
+            if args[2] == "show":
+                return unit_response()
+            self.error(self.cleanup, 409)
+            self.error(self.service, 409, controller=other)
+            return SimpleNamespace(returncode=0)
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+            result = self.controller.execute(self.cleanup)
+        self.assertEqual(sum(call.args[0][2] == "start" for call in run.call_args_list), 1)
+        self.assertEqual(self.events()[-1]["action_id"], result["action_id"])
+        self.wake.assert_called_once_with()
+        self.wake.reset_mock()
+        real_write, writes = os.write, 0
+        def fail_outcome(fd, data):
+            nonlocal writes
+            writes += 1
+            if writes == 2:
+                raise OSError(errno.ENOSPC, "full")
+            return real_write(fd, data)
+        with mock.patch.object(d.subprocess, "run", side_effect=systemctl), \
+                mock.patch.object(d.os, "write", side_effect=fail_outcome):
+            error = self.error(self.cleanup, 500, "unknown")
+        self.assertEqual(error.details["dispatch"]["status"], "accepted")
+        self.assertEqual(self.events()[-1]["event"], "started")
+        self.wake.assert_called_once_with()
+
+    def test_guarded_cleanup_real_signal_terminated_scheduler_is_unknown(self):
+        # A real helper can lose its reply after enqueueing; its signal exit is not a refusal.
+        original_run = subprocess.run
+        for number in (signal.SIGTERM, signal.SIGKILL):
+            with self.subTest(signal=number):
+                controller = self.controller_at(self.root / f"signal-{number}")
+                launched, starts = False, []
+                def systemctl(args, **kwargs):
+                    nonlocal launched
+                    self.assertEqual(args[:2], ["systemctl", "--user"])
+                    self.assertEqual(args[-2:], ["--", d.CLEANUP_UNIT])
+                    if args[2] == "show":
+                        raw = unit_response(
+                            ActiveState="activating" if launched else "inactive",
+                            SubState="start" if launched else "dead",
+                            InvocationID=INVOCATION if launched else "",
+                        ).stdout.encode()
+                        return original_run(
+                            [sys.executable, "-B", "-c",
+                             f"import sys; sys.stdout.buffer.write({raw!r})"],
+                            **kwargs,
+                        )
+                    self.assertEqual(args, ["systemctl", "--user", "start", "--no-block",
+                                            "--", d.CLEANUP_UNIT])
+                    self.assertEqual(self.events(controller)[-1]["event"], "started")
+                    launched = True
+                    starts.append(args)
+                    result = original_run(
+                        [sys.executable, "-B", "-c",
+                         f"import os,signal; os.kill(os.getpid(), signal.{number.name})"], **kwargs,
+                    )
+                    self.assertEqual(result.returncode, -number)
+                    return result
+                with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+                    error = self.error(self.cleanup, 502, "unknown", controller)
+                self.assertEqual(len(starts), 1)
+                self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                                 ["show", "start", "show"])
+                self.assertIs(error.details["dispatch_only"], True)
+                self.assertEqual(error.details["dispatch"]["status"], "unknown")
+                self.assertIs(error.details["dispatch"]["dispatched"], True)
+                self.assertEqual(error.details["observation"]["active"], "activating")
+                self.assertEqual(error.details["observation"]["invocation_id"], INVOCATION)
+                self.assertEqual([event["event"] for event in self.events(controller)],
+                                 ["started", "unknown"])
+                self.assertEqual(self.events(controller)[-1]["observation"],
+                                 error.details["observation"])
+                self.assertNotIn("rejected", json.dumps(self.events(controller)))
+        self.assertEqual(self.wake.call_count, 2)
+
+    def test_guarded_cleanup_real_undecodable_unit_reads_fail_closed(self):
+        # Real bytes must fail inside subprocess's text decoder, before any fake decoded result exists.
+        original_run = subprocess.run
+        for phase in ("prelaunch", "postlaunch"):
+            with self.subTest(phase=phase):
+                controller = self.controller_at(self.root / phase)
+                launched, starts = False, []
+                def systemctl(args, **kwargs):
+                    nonlocal launched
+                    self.assertEqual(args[:2], ["systemctl", "--user"])
+                    self.assertEqual(args[-2:], ["--", d.CLEANUP_UNIT])
+                    if args[2] == "show":
+                        self.assertIs(kwargs["text"], True)
+                        self.assertIs(kwargs["capture_output"], True)
+                        self.assertEqual(kwargs["timeout"], 2)
+                        raw = unit_response().stdout.encode()
+                        code = ("import os; os.write(1, bytes([255]))" if phase == "prelaunch" or launched
+                                else f"import sys; sys.stdout.buffer.write({raw!r})")
+                        return original_run(
+                            [sys.executable, "-B", "-c", code], **kwargs,
+                        )
+                    self.assertEqual(args, ["systemctl", "--user", "start", "--no-block",
+                                            "--", d.CLEANUP_UNIT])
+                    self.assertEqual(self.events(controller)[-1]["event"], "started")
+                    starts.append(args)
+                    launched = True
+                    return original_run([sys.executable, "-B", "-c", "pass"], **kwargs)
+                self.wake.reset_mock()
+                with mock.patch.object(d.subprocess, "run", side_effect=systemctl) as run:
+                    error = self.error(self.cleanup, 503,
+                                       "failed" if phase == "prelaunch" else "unknown", controller)
+                self.assertEqual(len(starts), 0 if phase == "prelaunch" else 1)
+                self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                                 ["show"] if phase == "prelaunch" else ["show", "start", "show"])
+                observation = error.details["observation"]
+                self.assertEqual((observation["status"], observation["error"]), ("unknown", "malformed"))
+                self.assertIsNone(observation["exit_status"])
+                self.assertRegex(observation["read_at"], r"Z$")
+                self.assertIn("decod", observation["detail"].lower())
+                self.assertIs(error.details["dispatch_only"], True)
+                self.assertEqual(error.details["dispatch"]["status"],
+                                 "not_dispatched" if phase == "prelaunch" else "accepted")
+                self.assertEqual([event["event"] for event in self.events(controller)],
+                                 ["started", "failed" if phase == "prelaunch" else "unknown"])
+                self.assertNotIn("0xff", json.dumps(self.events(controller)))
+                self.wake.assert_called_once_with()
 
     def test_container_exact_requests_and_volume_retention(self):
         # Exercise real Unix HTTP, full IDs, both engines and no volume/force flags.

@@ -2,11 +2,14 @@
 
 const $ = id => document.getElementById(id);
 let snapshot = null;
+let snapshotReceipt = null;
 let paused = false;
 let refreshing = false;
 let detailTarget = null;
 let pendingAction = null;
 let actionBusy = false;
+const CLEANUP_UNIT = "system-janitor-catchup.service";
+const cleanupRunning = new Set(["active", "activating", "deactivating", "reloading", "refreshing"]);
 let token = new URLSearchParams(location.hash.slice(1)).get("token") || sessionStorage.getItem("dashboard-token") || "";
 if (location.hash) history.replaceState(null, "", location.pathname);
 const bytes = value => {
@@ -42,13 +45,104 @@ function detailFields(fields) {
     dt.textContent = key; dd.textContent = value ?? "Unknown"; $("detail-fields").append(dt, dd);
   });
 }
+function cleanupFeature() {
+  const actions = snapshot?.actions, control = actions?.cleanup;
+  return actions?.enabled === true && Array.isArray(actions.capabilities) &&
+    ["guarded-cleanup", "cleanup-job-state"].every(name => actions.capabilities.includes(name)) &&
+    control?.kind === "cleanup" && control.action === "run" && control.unit === CLEANUP_UNIT &&
+    control.scope === "user" && control.dispatch_only === true;
+}
+function receiptFor(response, requestedAt) {
+  const receivedAt = performance.now(), date = response.headers?.get?.("Date");
+  const serverTime = typeof date === "string" ? Date.parse(date) : NaN;
+  if (!Number.isFinite(serverTime) || new Date(serverTime).toUTCString() !== date ||
+      !Number.isFinite(requestedAt) || !Number.isFinite(receivedAt) ||
+      requestedAt < 0 || receivedAt < requestedAt) return null;
+  return {serverTime, requestedAt, receivedAt};
+}
+function observationAge(timestamp) {
+  const receipt = snapshotReceipt, source = typeof timestamp === "string" ? Date.parse(timestamp) : NaN;
+  if (!receipt || receipt.snapshot !== snapshot || !Number.isFinite(source) ||
+      ![receipt.serverTime, receipt.requestedAt, receipt.receivedAt].every(Number.isFinite)) return NaN;
+  const elapsed = performance.now() - receipt.receivedAt;
+  const transit = receipt.receivedAt - receipt.requestedAt, initial = receipt.serverTime - source;
+  if (!Number.isFinite(elapsed) || elapsed < 0 || transit < 0 || initial < -1000) return NaN;
+  // HTTP Date has second precision. Include that uncertainty and the full request
+  // transit conservatively; phone wall-clock offsets/jumps never grant freshness.
+  return (initial + 1000 + transit + elapsed) / 1000;
+}
+function freshCleanup(service = snapshot?.janitor?.service) {
+  const age = observationAge(service?.read_at), cacheAge = observationAge(snapshot?.generated_at);
+  const limit = snapshot?.stale_after_seconds || 20;
+  return service?.status === "available" && service.unit === CLEANUP_UNIT &&
+    service.id === CLEANUP_UNIT && service.scope === "user" && service.load_state === "loaded" &&
+    Number.isFinite(age) && age >= 0 && age <= limit &&
+    Number.isFinite(cacheAge) && cacheAge >= 0 && cacheAge <= limit;
+}
+function cleanupAllowed() {
+  const service = snapshot?.janitor?.service;
+  return cleanupFeature() && freshCleanup(service) && service.can_start === true &&
+    service.refuse_manual_start === false && ["inactive", "failed"].includes(service.active);
+}
+function cleanupPolicy() {
+  if (!snapshot?.actions?.enabled) return "Read-only mode. Homelab controls are not enabled.";
+  if (!cleanupFeature()) return "Guarded cleanup is not supported by this backend's control metadata.";
+  const service = snapshot?.janitor?.service;
+  if (service?.status === "unavailable") return `${CLEANUP_UNIT} is unavailable (missing, masked or unusable). No fallback cleanup.`;
+  if (!Number.isFinite(observationAge(snapshot?.generated_at)) || !Number.isFinite(observationAge(service?.read_at))) return "Server-relative snapshot/unit age evidence is unavailable. Refresh before scheduling; no fallback cleanup.";
+  if (!freshCleanup(service)) return "Guarded runner state is unknown or stale. Refresh before scheduling; no fallback cleanup.";
+  if (cleanupRunning.has(service.active)) return "Guarded runner is busy or changing state. Observe it; no duplicate run will be scheduled.";
+  if (!cleanupAllowed()) return "The guarded user unit cannot be started under its current policy.";
+  return "Schedules only the existing guarded user unit. Leases, budgets, cooldown and active-work protections stay unchanged; work may defer or reclaim zero bytes. No force cleanup.";
+}
+function unitObservation(service) {
+  if (!service) return `${CLEANUP_UNIT}: unknown; no unit observation.`;
+  if (service.status !== "available") return `${CLEANUP_UNIT}: ${service.status || "unknown"}; ${service.detail || "state unavailable"}; read ${when(service.read_at)}.`;
+  return `${CLEANUP_UNIT}: ${service.load_state} / ${service.active} / ${service.sub}; result ${service.result ?? "Unknown"}; exit ${service.exit_status ?? "Unknown"}; invocation ${service.invocation_id || "unverified"}; read ${when(service.read_at)}.`;
+}
+function maintenanceFields(item) {
+  const service = item.service, saved = item.maintenance, native = item.last_run, timer = item.timer || {};
+  const linked = item.maintenance_phase_linked === true && /^[0-9a-f]{32}$/.test(service?.invocation_id || "") &&
+    service.invocation_id === saved?.service_invocation_id;
+  return [
+    ["Guarded user unit", CLEANUP_UNIT],
+    ["Current unit observation", unitObservation(service)],
+    ["Monitor timer", timer.ActiveState || "Unknown"],
+    ["Next check", timer.NextElapseUSecRealtime || "Unknown"],
+    ["Saved budget phase", `${saved?.status || "Unknown"} / ${when(saved?.generated_at)}`],
+    ["Budget phase association", linked ? "Linked to the observed invocation: budget phase only, not whole-wrapper or native Janitor completion." : "Dated/unlinked last result; no verified current-invocation association."],
+    ["Last cleanup", when(saved?.last_cleanup_at)],
+    ["Cooldown remaining", saved?.cooldown_remaining_sec == null ? "Unknown" : `${saved.cooldown_remaining_sec}s`],
+    ["New builds queued", saved?.build_admission?.waiting?.length ?? "Unknown"],
+    ["Saved removed artifact bytes", bytes(saved?.removed_bytes)],
+    ["Saved observed free-space change", bytes(saved?.observed_reclaimed_bytes)],
+    ["Native Janitor result (separate)", when(native?.ended_at)],
+    ["Native safety integrity", native?.safety_integrity ?? "Unknown"],
+    ["Native run reclaimed", bytes(Number.isFinite(native?.freed_kb) ? native.freed_kb * 1024 : null)],
+  ];
+}
+function cleanupReceipt(result) {
+  const dispatch = result.dispatch;
+  const receipt = dispatch?.status === "accepted" ? "Scheduling accepted (dispatch only, not cleanup completion)." :
+    dispatch?.status === "already_running" ? "Existing runner observed; no duplicate scheduled." :
+    `Scheduling ${dispatch?.status || "unknown"}; execution is not confirmed complete.`;
+  return `${result.message || result.error || ""} ${receipt} Fresh unit observation: ${unitObservation(result.observation)}`;
+}
+function openMaintenance(confirm = false) {
+  if (actionBusy) return;
+  if (snapshot?.janitor?.service || cleanupFeature()) {
+    showDetails("Maintenance", snapshot?.janitor || {});
+    if (confirm && cleanupAllowed()) confirmAction("run", "Run guarded cleanup");
+  } else if (snapshot?.janitor?.last_run) showDetails("Cleanup", snapshot.janitor.last_run);
+}
 function showDetails(kind, item) {
   if (actionBusy) return;
   detailTarget = {kind, item};
   pendingAction = null;
   $("action-confirm").hidden = true;
   text("action-result", "");
-  const fields = kind === "Service" ? [["Unit", item.unit], ["Scope", item.scope], ["State", item.active], ["Substate", item.sub], ["Description", item.description]] :
+  const fields = kind === "Maintenance" ? maintenanceFields(item) :
+    kind === "Service" ? [["Unit", item.unit], ["Scope", item.scope], ["State", item.active], ["Substate", item.sub], ["Description", item.description]] :
     kind === "Process" ? [["Name", item.name], ["PID", item.pid], ["CPU", pct(item.cpu_percent)], ["RAM", bytes(item.memory_bytes)]] :
     kind === "Container" ? [["Name", item.Names], ["Engine", item.engine], ["ID", item.ID], ["Image", item.Image], ["State", item.State || item.Status]] :
     [["Run", item.run_id], ["Started", when(item.started_at)], ["Finished", when(item.ended_at)], ["Reclaimed", bytes(Number.isFinite(item.freed_kb) ? item.freed_kb * 1024 : null)], ["Safety integrity", item.safety_integrity]];
@@ -67,7 +161,10 @@ function drawActions() {
   }
   const {kind, item} = detailTarget;
   let choices = [];
-  if (kind === "Container" && !item.protected && /^[a-f0-9]{64}$/.test(item.id || "")) {
+  if (kind === "Maintenance") {
+    if (cleanupAllowed()) choices = [["run", "Run guarded cleanup"]];
+    text("detail-policy", cleanupPolicy());
+  } else if (kind === "Container" && !item.protected && /^[a-f0-9]{64}$/.test(item.id || "")) {
     choices = item.State === "running" || item.State === "paused" || item.State === "restarting" ?
       [["stop", "Stop gracefully"], ["kill", "Kill now"]] : [["remove", "Remove container"]];
     text("detail-policy", "Container actions keep all volumes. Running containers must be stopped before removal.");
@@ -92,13 +189,19 @@ function drawActions() {
 function confirmAction(action, label) {
   if (actionBusy || !detailTarget) return;
   const {kind, item} = detailTarget;
-  const payload = kind === "Container" ? {kind: "container", engine: item.engine, id: item.id, action} :
+  if (kind === "Maintenance" && (!cleanupAllowed() || action !== "run")) {
+    text("detail-policy", cleanupPolicy()); return;
+  }
+  const payload = kind === "Maintenance" ? {kind: "cleanup", action: "run"} :
+    kind === "Container" ? {kind: "container", engine: item.engine, id: item.id, action} :
     kind === "Process" ? {kind: "process", pid: item.pid, start_time_ticks: item.start_time_ticks, action} :
     {kind: "service", scope: item.scope, unit: item.unit, action};
-  const target = kind === "Container" ? `${item.Names} (${item.engine}, ${item.ID})` :
+  const target = kind === "Maintenance" ? `${CLEANUP_UNIT} (current user)` :
+    kind === "Container" ? `${item.Names} (${item.engine}, ${item.ID})` :
     kind === "Process" ? `${item.name} (PID ${item.pid})` : `${item.unit} (${item.scope})`;
   pendingAction = {payload, target, label};
-  const effect = action === "remove" ? " Volumes will be kept." :
+  const effect = kind === "Maintenance" ? " Scheduling only, not cleanup completion. The existing guard may defer busy work or reclaim zero bytes; no force mode." :
+    action === "remove" ? " Volumes will be kept." :
     kind === "Container" && action === "stop" ? " The daemon waits up to 10 seconds, then may force-kill if it has not exited." : "";
   text("action-question", `${label}: ${target}?${effect}`);
   text("action-run", label);
@@ -108,7 +211,12 @@ function confirmAction(action, label) {
 async function runAction() {
   if (actionBusy || !pendingAction || !snapshot?.actions?.nonce) return;
   const request = pendingAction;
+  if (request.payload.kind === "cleanup" && !cleanupAllowed()) {
+    pendingAction = null; $("action-confirm").hidden = true;
+    text("action-result", cleanupPolicy()); return;
+  }
   actionBusy = true;
+  $("cleanup-run").disabled = true;
   $("action-run").disabled = true; $("action-cancel").disabled = true; $("detail-close").disabled = true;
   text("action-result", `${request.label} in progress for ${request.target}...`);
   try {
@@ -119,8 +227,13 @@ async function runAction() {
       body: JSON.stringify(request.payload), signal: AbortSignal.timeout(20000),
     });
     const result = await response.json();
-    if (!response.ok || !result.ok) throw new Error(result.error || `Action failed (HTTP ${response.status})`);
-    text("action-result", result.message);
+    if (request.payload.kind === "cleanup") {
+      if (!response.ok || !result.ok) throw new Error(cleanupReceipt(result));
+      text("action-result", cleanupReceipt(result));
+    } else {
+      if (!response.ok || !result.ok) throw new Error(result.error || `Action failed (HTTP ${response.status})`);
+      text("action-result", result.message);
+    }
   } catch (error) {
     text("action-result", `${error.message}. Refresh the observation before retrying; an interrupted request may still complete.`);
   } finally {
@@ -242,8 +355,44 @@ function drawHistory() {
   });
   text("history-note", `${points.length} observations shown since ${when(points[0]?.ts)}. ${(snapshot?.history || []).length} / 360 held in memory; resets on restart.`);
 }
-function render(value) {
+function renderMaintenance() {
+  const item = snapshot?.janitor || {}, saved = item.maintenance, service = item.service;
+  text("cache", bytes(saved?.cache_bytes));
+  text("cache-detail", `${bytes(saved?.cache_budget_bytes)} soft budget / ${when(saved?.generated_at)}`);
+  if (service || cleanupFeature()) {
+    let label = "Runner unknown", good = false;
+    if (service?.status === "unavailable") label = "Runner unavailable";
+    else if (freshCleanup(service)) {
+      if (cleanupRunning.has(service.active)) label = `Runner ${service.active === "active" ? "running" : service.active}`;
+      else if (service.active === "failed" || service.result !== "success" || service.exit_status !== 0) label = "Runner failed";
+      else if (service.active === "inactive" && service.invocation_id) { label = "Runner finished (unit only)"; good = true; }
+      else label = "Runner inactive / no verified execution";
+    } else if (service?.status === "available") label = "Runner stale / unknown";
+    badge("maintenance-status", label, good);
+  } else badge("maintenance-status", saved?.status || "Unknown", !!saved && saved.status !== "error");
+  $("maintenance-summary").replaceChildren();
+  maintenanceFields(item).forEach(([key, data]) => {
+    const dt = document.createElement("dt"), dd = document.createElement("dd");
+    dt.textContent = key; dd.textContent = data; $("maintenance-summary").append(dt, dd);
+  });
+  const actions = (saved?.actions || []).map(action => `${action.path || action.kind || "Cleanup"}: ${action.removed_bytes == null ? "removed; size unknown" : bytes(action.removed_bytes)}`);
+  text("maintenance-actions", !saved ? "Saved budget phase unknown; no result yet." :
+    saved.status === "deferred" ? `Saved budget phase deferred. Busy or unbacked work stays protected. ${actions.join(" / ")}` :
+    actions.length ? `Saved budget-phase removals: ${actions.join(" / ")}. Removed bytes and concurrent free-space change are separate, not a guaranteed reclaim total.` :
+    Array.isArray(saved.actions) ? "No deletion recorded in the saved budget phase; zero work is valid. This is not whole-runner or native Janitor completion." :
+    "Saved budget phase has no action records; deletion outcome unknown.");
+  $("cleanup-run").hidden = !cleanupFeature();
+  $("cleanup-run").disabled = actionBusy || !cleanupAllowed();
+  text("cleanup-run", "Run guarded cleanup");
+  text("cleanup-policy", cleanupPolicy());
+  const details = !!service || cleanupFeature();
+  text("cleanup-details", details ? "Maintenance details" : "View last cleanup");
+  $("cleanup-details").disabled = !details && !item.last_run;
+  list("protected", (saved?.workspaces || []).filter(work => work.status !== "removed").map(work => `${work.path}: ${work.status}`), "No protected workspace records in the latest scan.");
+}
+function render(value, receipt = null) {
   snapshot = value;
+  snapshotReceipt = receipt ? {...receipt, snapshot: value} : null;
   $("content").hidden = false;
   $("login").hidden = true;
   text("host", `${value.host} / ${value.actions?.enabled ? "homelab controls enabled" : "private, read-only monitoring"}`);
@@ -265,30 +414,7 @@ function render(value) {
   const uptime = system.uptime_seconds;
   text("uptime", uptime == null ? "Unknown" : `${Math.floor(uptime / 86400)}d ${Math.floor(uptime / 3600) % 24}h`);
   text("swap", `Swap ${bytes(system.swap_used_bytes)} / ${bytes(system.swap_total_bytes)}`);
-  const maintenance = value.janitor?.maintenance;
-  text("cache", bytes(maintenance?.cache_bytes));
-  text("cache-detail", `${bytes(maintenance?.cache_budget_bytes)} soft budget / ${when(maintenance?.generated_at)}`);
-  badge("maintenance-status", maintenance?.status || "Unknown", !!maintenance && !["error"].includes(maintenance.status));
-  const timer = value.janitor?.timer || {};
-  const summary = [
-    ["Monitor timer", timer.ActiveState || "Unknown"],
-    ["Next check", timer.NextElapseUSecRealtime || "Unknown"],
-    ["Last cleanup", when(maintenance?.last_cleanup_at)],
-    ["Cooldown remaining", maintenance ? `${maintenance.cooldown_remaining_sec}s` : "Unknown"],
-    ["New builds queued", maintenance?.build_admission?.waiting?.length ?? "Unknown"],
-    ["Last run reclaimed", maintenance ? bytes(maintenance.observed_reclaimed_bytes) : "Unknown"],
-    ["Native Janitor", when(value.janitor?.last_run?.ended_at)],
-    ["Native run reclaimed", bytes(Number.isFinite(value.janitor?.last_run?.freed_kb) ? value.janitor.last_run.freed_kb * 1024 : null)],
-  ];
-  $("maintenance-summary").replaceChildren();
-  summary.forEach(([key, data]) => {
-    const dt = document.createElement("dt"), dd = document.createElement("dd");
-    dt.textContent = key; dd.textContent = data; $("maintenance-summary").append(dt, dd);
-  });
-  const actions = (maintenance?.actions || []).map(action => `${action.path || action.kind || "Cleanup"}: ${action.removed_bytes == null ? "completed; size unknown" : bytes(action.removed_bytes)}`);
-  text("maintenance-actions", actions.length ? actions.join(" / ") : "No deletion in the latest maintenance check. Busy or unbacked work stays protected.");
-  $("cleanup-details").disabled = !value.janitor?.last_run;
-  list("protected", (maintenance?.workspaces || []).filter(item => item.status !== "removed").map(item => `${item.path}: ${item.status}`), "No protected workspace records in the latest scan.");
+  renderMaintenance();
   $("filesystems").replaceChildren(...(value.filesystems || []).map(disk => row([disk.mount, bytes(disk.available_bytes), pct(disk.used_percent), disk.inode_used_percent == null ? "Unknown" : pct(disk.inode_used_percent)])));
   if (!value.filesystems) $("filesystems").append(row(["Storage source unavailable", "", "", ""]));
   $("network").replaceChildren();
@@ -312,6 +438,7 @@ async function refresh(manual = false) {
   $("refresh-now").disabled = true;
   let retry = true;
   clearTimeout(refreshTimer);
+  const requestedAt = performance.now();
   try {
     const response = await fetch("/api/snapshot", {headers: {Authorization: `Bearer ${token}`}, cache: "no-store", signal: AbortSignal.timeout(10000)});
     if (response.status === 401) {
@@ -320,11 +447,13 @@ async function refresh(manual = false) {
       badge("connection", "Access required", false); notice("Access token missing or invalid. Your previous observations, if any, are stale."); return;
     }
     if (!response.ok) throw new Error(`Snapshot unavailable (HTTP ${response.status})`);
+    const receipt = receiptFor(response, requestedAt);
     const value = await response.json();
     if (paused && !manual) return;
-    const age = (Date.now() - new Date(value.generated_at).getTime()) / 1000;
-    render(value);
-    if (age > (value.stale_after_seconds || 20)) { badge("connection", "Stale data", false); notice(`Last observation is ${Math.round(age)} seconds old; the collector may be delayed.`); }
+    render(value, receipt);
+    const age = observationAge(value.generated_at);
+    if (!Number.isFinite(age)) { badge("connection", "Age unknown / stale", false); notice("Server-relative snapshot age evidence is unavailable. Refresh for authoritative time evidence; guarded cleanup stays disabled."); }
+    else if (age > (value.stale_after_seconds || 20)) { badge("connection", "Stale data", false); notice(`Last observation is ${Math.round(age)} seconds old; the collector may be delayed.`); }
     else notice("");
     sessionStorage.setItem("dashboard-token", token);
   } catch (error) {
@@ -352,5 +481,6 @@ $("detail-close").addEventListener("click", () => $("detail-dialog").close());
 $("detail-dialog").addEventListener("cancel", event => { if (actionBusy) event.preventDefault(); });
 $("action-run").addEventListener("click", runAction);
 $("action-cancel").addEventListener("click", () => { if (!actionBusy) { pendingAction = null; $("action-confirm").hidden = true; } });
-$("cleanup-details").addEventListener("click", () => { if (snapshot?.janitor?.last_run) showDetails("Cleanup", snapshot.janitor.last_run); });
+$("cleanup-details").addEventListener("click", () => openMaintenance());
+$("cleanup-run").addEventListener("click", () => openMaintenance(true));
 refresh();

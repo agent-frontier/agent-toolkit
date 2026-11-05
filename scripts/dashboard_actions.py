@@ -19,11 +19,14 @@ import stat
 import subprocess
 import threading
 import time
+from typing import Optional, TypedDict
 import uuid
 
 
 HTTP_TIMEOUT = 15
 SERVICE_TIMEOUT = 12
+UNIT_STATE_TIMEOUT = 2
+CLEANUP_UNIT = "system-janitor-catchup.service"
 RESPONSE_LIMIT = 2 * 1024 * 1024
 AUDIT_LIMIT = 5 * 1024 * 1024
 AUDIT_BACKUPS = 8
@@ -61,15 +64,40 @@ _CRITICAL_PROCESSES = frozenset({
     "ssh-agent", "gpg-agent",
 })
 _UNIT = re.compile(r"(?:[A-Za-z0-9:_.@-]|\\x[0-9A-Fa-f]{2})+\.service")
+_INVOCATION = re.compile(r"[0-9A-Fa-f]{32}")
+_UNIT_PROPERTIES = (
+    "Id", "LoadState", "ActiveState", "SubState", "Result", "ExecMainStatus",
+    "InvocationID", "CanStart", "RefuseManualStart",
+)
+RUNNING_STATES = frozenset({"active", "activating", "deactivating", "reloading", "refreshing"})
+
+
+class UserUnitState(TypedDict):
+    unit: str
+    scope: str
+    status: str
+    id: Optional[str]
+    load_state: Optional[str]
+    active: Optional[str]
+    sub: Optional[str]
+    result: Optional[str]
+    exit_status: Optional[int]
+    invocation_id: Optional[str]
+    can_start: Optional[bool]
+    refuse_manual_start: Optional[bool]
+    read_at: str
+    error: Optional[str]
+    detail: Optional[str]
 
 
 class ActionError(Exception):
     """Public, secret-free error; unknown means an action may have completed."""
 
-    def __init__(self, status, message, outcome="failed"):
+    def __init__(self, status, message, outcome="failed", *, details=None):
         super().__init__(message)
         self.status = status
         self.outcome = outcome
+        self.details = details or {}
 
 
 def _process(pid):
@@ -131,6 +159,92 @@ def _now():
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _unit_gap(unit, error, detail) -> UserUnitState:
+    return {
+        "unit": unit, "scope": "user", "status": "unknown", "id": None,
+        "load_state": None, "active": None, "sub": None, "result": None,
+        "exit_status": None, "invocation_id": None, "can_start": None,
+        "refuse_manual_start": None, "read_at": _now(), "error": error, "detail": detail,
+    }
+
+
+def user_unit_state(unit: str) -> UserUnitState:
+    """Read one exact user unit in two seconds; gaps never become healthy zeroes."""
+    if (type(unit) is not str or not 1 < len(unit) <= 255
+            or unit.startswith(("-", ".")) or _UNIT.fullmatch(unit) is None):
+        raise ValueError("An exact service unit name is required.")
+    try:
+        response = subprocess.run(
+            ["systemctl", "--user", "show", "--no-pager",
+             "--property=" + ",".join(_UNIT_PROPERTIES), "--", unit],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, shell=False,
+            timeout=UNIT_STATE_TIMEOUT, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return _unit_gap(unit, "timeout", "User-unit state read timed out after two seconds.")
+    except UnicodeDecodeError:
+        return _unit_gap(unit, "malformed", "User-unit state text decoding failed.")
+    except OSError:
+        return _unit_gap(unit, "read_failed", "User-unit state could not be read.")
+    if type(response.returncode) is not int or response.returncode != 0:
+        return _unit_gap(unit, "read_failed", "User-unit state query failed; DBus state is unknown.")
+    if type(response.stdout) is not str or len(response.stdout) > RESPONSE_LIMIT:
+        return _unit_gap(unit, "malformed", "User-unit state output is invalid or oversized.")
+    try:
+        properties = {}
+        for line in response.stdout.splitlines():
+            if "=" not in line:
+                raise ValueError("Malformed user-unit property.")
+            key, value = line.split("=", 1)
+            if key not in _UNIT_PROPERTIES or key in properties:
+                raise ValueError("Unexpected or duplicate user-unit property.")
+            properties[key] = value
+        if set(properties) != set(_UNIT_PROPERTIES):
+            raise ValueError("Incomplete user-unit state.")
+        load = properties["LoadState"]
+        if load not in {"loaded", "not-found", "masked", "stub", "error", "bad-setting", "merged"}:
+            raise ValueError("Invalid user-unit load state.")
+        identifier = properties["Id"]
+        if _UNIT.fullmatch(identifier) is None:
+            raise ValueError("Invalid canonical user-unit ID.")
+        active, sub, result = (properties[key] for key in ("ActiveState", "SubState", "Result"))
+        if active not in RUNNING_STATES | {"inactive", "failed", "maintenance"}:
+            raise ValueError("Invalid user-unit active state.")
+        if re.fullmatch(r"[a-z][a-z0-9-]*", sub) is None:
+            raise ValueError("Invalid user-unit substate.")
+        if not (result == "" and load != "loaded") and re.fullmatch(r"[a-z][a-z0-9-]*", result) is None:
+            raise ValueError("Invalid user-unit result.")
+        raw_exit = properties["ExecMainStatus"]
+        if raw_exit == "" and load != "loaded":
+            exit_status = None
+        elif re.fullmatch(r"[0-9]{1,3}", raw_exit) is not None and int(raw_exit) <= 255:
+            exit_status = int(raw_exit)
+        else:
+            raise ValueError("Invalid or non-finite user-unit exit status.")
+        invocation = properties["InvocationID"]
+        if invocation and _INVOCATION.fullmatch(invocation) is None:
+            raise ValueError("Invalid user-unit invocation ID.")
+        flags = []
+        for key in ("CanStart", "RefuseManualStart"):
+            value = properties[key]
+            if value not in {"yes", "no"}:
+                raise ValueError("Invalid user-unit start policy.")
+            flags.append(value == "yes")
+    except ValueError as error:
+        return _unit_gap(unit, "malformed", str(error))
+    can_start, refuse = flags
+    usable = (load == "loaded" and identifier == unit and can_start and not refuse
+              and active != "maintenance")
+    return {
+        "unit": unit, "scope": "user", "status": "available" if usable else "unavailable",
+        "id": identifier, "load_state": load, "active": active, "sub": sub,
+        "result": result or None, "exit_status": exit_status,
+        "invocation_id": invocation.lower() or None, "can_start": can_start,
+        "refuse_manual_start": refuse, "read_at": _now(), "error": None,
+        "detail": None if usable else "User unit is missing, masked, noncanonical or unusable.",
+    }
+
+
 def _validate(payload):
     if type(payload) is not dict:
         raise ActionError(400, "Action must be a JSON object.")
@@ -139,6 +253,7 @@ def _validate(payload):
         "container": {"kind", "engine", "id", "action"},
         "process": {"kind", "pid", "start_time_ticks", "action"},
         "service": {"kind", "scope", "unit", "action"},
+        "cleanup": {"kind", "action"},
     }
     if type(kind) is not str or kind not in shapes or set(payload) != shapes[kind]:
         raise ActionError(400, "Unknown action kind or unexpected action fields.")
@@ -155,13 +270,15 @@ def _validate(payload):
                 for key in ("pid", "start_time_ticks"))
                 or payload["action"] not in {"terminate", "kill"}):
             raise ActionError(400, "Invalid process action or identity.")
-    else:
+    elif kind == "service":
         unit = payload["unit"]
         if (type(payload["scope"]) is not str or payload["scope"] != "user"
                 or type(unit) is not str or not 1 < len(unit) <= 255
                 or unit.startswith(("-", ".")) or _UNIT.fullmatch(unit) is None
                 or payload["action"] != "stop"):
             raise ActionError(400, "Only exact user service stop actions are supported.")
+    elif payload["action"] != "run":
+        raise ActionError(400, "Only guarded cleanup run is supported.")
     return payload.copy()
 
 
@@ -220,7 +337,10 @@ class Controller:
 
     def describe(self):
         return {"enabled": True, "nonce": self.nonce, "owner_uid": os.getuid(),
-                "protected_services": sorted(PROTECTED_SERVICES)}
+                "protected_services": sorted(PROTECTED_SERVICES),
+                "capabilities": ["cleanup-job-state", "guarded-cleanup"],
+                "cleanup": {"kind": "cleanup", "action": "run", "unit": CLEANUP_UNIT,
+                            "scope": "user", "dispatch_only": True}}
 
     def _open_state(self):
         directory, locked = None, False
@@ -300,33 +420,42 @@ class Controller:
             directory = self._open_state()
             action_id = uuid.uuid4().hex
             target = {key: value for key, value in request.items() if key not in {"kind", "action"}}
+            if request["kind"] == "cleanup":
+                target = {"scope": "user", "unit": CLEANUP_UNIT}
             base = {"action_id": action_id, "kind": request["kind"],
                     "action": request["action"], "target": target}
             self._audit(dict(base, event="started", time=_now()), directory)
-            error, message = None, None
+            error, message, details = None, None, {}
             try:
                 message = getattr(self, f"_do_{request['kind']}")(request)
+                if request["kind"] == "cleanup":
+                    details = {key: value for key, value in message.items() if key != "message"}
+                    message = message["message"]
             except ActionError as exc:
                 error = exc
+                details = exc.details
             if self._wake is not None:
                 try:
                     self._wake()
                 except (OSError, ValueError, RuntimeError):
                     error = ActionError(500, "Sampler refresh failed after the attempt; result unknown.",
-                                        "unknown")
+                                        "unknown", details=details)
             completed_at = _now()
             outcome = error.outcome if error else "succeeded"
+            if not error and request["kind"] == "cleanup":
+                outcome = "accepted" if details["dispatch"]["dispatched"] else "observed"
             try:
                 self._audit(dict(base, event=outcome, time=completed_at,
                                  status=error.status if error else 200,
-                                 message=str(error) if error else message), directory)
+                                 message=str(error) if error else message, **details), directory)
             except ActionError:
                 raise ActionError(500, "Action attempted but its outcome could not be audited; "
-                                  "result unknown.", "unknown") from None
+                                  "result unknown.", "unknown", details=details) from None
             if error is not None:
                 raise error
             return {"ok": True, "action_id": action_id, "kind": request["kind"],
-                    "action": request["action"], "message": message, "completed_at": completed_at}
+                    "action": request["action"], "message": message, "completed_at": completed_at,
+                    **details}
         finally:
             if directory is not None:
                 os.close(directory)
@@ -338,6 +467,56 @@ class Controller:
                 or any(not isinstance(item, dict) for item in value["items"])):
             raise ActionError(503, "Fresh target inventory is unavailable.")
         return value["items"]
+
+    def _do_cleanup(self, request):
+        before = user_unit_state(CLEANUP_UNIT)
+        details = {
+            "dispatch_only": True,
+            "dispatch": {"status": "not_dispatched", "dispatched": False,
+                         "unit": CLEANUP_UNIT, "scope": "user"},
+            "observation": before,
+        }
+        if before["status"] != "available":
+            status = 404 if before["load_state"] == "not-found" else 503
+            raise ActionError(status, f"Guarded cleanup unit {CLEANUP_UNIT} is unavailable: "
+                              f"{before['detail']}", details=details)
+        if before["active"] in RUNNING_STATES:
+            details["dispatch"]["status"] = "already_running"
+            return dict(details, message="Guarded cleanup runner is already running or changing "
+                        "state; observing it without scheduling a duplicate.")
+        try:
+            response = subprocess.run(
+                ["systemctl", "--user", "start", "--no-block", "--", CLEANUP_UNIT],
+                stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                shell=False, timeout=SERVICE_TIMEOUT, check=False,
+            )
+        except subprocess.TimeoutExpired:
+            details["dispatch"].update(status="unknown", dispatched=True)
+            details["observation"] = user_unit_state(CLEANUP_UNIT)
+            raise ActionError(504, "Guarded cleanup scheduling timed out after launch; result "
+                              "unknown. Refresh unit state; do not automatically retry.",
+                              "unknown", details=details) from None
+        except OSError:
+            raise ActionError(503, "Could not launch guarded cleanup scheduling.",
+                              details=details) from None
+        details["dispatch"].update(status="accepted", dispatched=True)
+        details["observation"] = user_unit_state(CLEANUP_UNIT)
+        if response.returncode < 0:
+            details["dispatch"]["status"] = "unknown"
+            raise ActionError(502, f"Guarded cleanup scheduling helper was terminated by signal "
+                              f"{-response.returncode}; scheduling result unknown. Refresh unit "
+                              "state; do not automatically retry.", "unknown", details=details)
+        if response.returncode > 0:
+            details["dispatch"]["status"] = "rejected"
+            raise ActionError(502, f"Guarded cleanup scheduling failed (rc={response.returncode}).",
+                              details=details)
+        if details["observation"]["status"] != "available":
+            status = 504 if details["observation"]["error"] == "timeout" else 503
+            raise ActionError(status, "Guarded cleanup scheduling was accepted, but the fresh "
+                              "unit observation is unavailable; execution outcome unknown.",
+                              "unknown", details=details)
+        return dict(details, message="Guarded cleanup scheduling accepted (dispatch only). "
+                    "This does not mean cleanup completed.")
 
     def _do_container(self, request):
         try:

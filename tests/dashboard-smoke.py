@@ -7,6 +7,7 @@ import json
 import os
 from pathlib import Path
 import re
+import signal
 import socket
 import ssl
 import subprocess
@@ -22,6 +23,18 @@ ROOT = Path(__file__).resolve().parent.parent
 SPEC = importlib.util.spec_from_file_location("dashboard", ROOT / "scripts/server-dashboard.py")
 d = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(d)
+INVOCATION = "b" * 32
+
+
+def unit_state(**changes):
+    value = {
+        "unit": "system-janitor-catchup.service", "scope": "user", "status": "available",
+        "id": "system-janitor-catchup.service", "load_state": "loaded", "active": "inactive",
+        "sub": "dead", "result": "success", "exit_status": 0, "invocation_id": INVOCATION,
+        "can_start": True, "refuse_manual_start": False, "read_at": d.action_module()._now(),
+        "error": None, "detail": None,
+    }
+    return dict(value, **changes)
 
 
 class CollectorTests(unittest.TestCase):
@@ -39,6 +52,10 @@ class CollectorTests(unittest.TestCase):
         (self.proc / "net/dev").write_text("header\nheader\neth0: 1000 0 0 0 0 0 0 0 2000 0\n")
         self.process(100, 30)
         self.collector = d.Collector(state=self.root / "state", proc=self.proc)
+        # Every collector DBus observation is a fixture; no host unit is queried.
+        patcher = mock.patch.object(d.action_module(), "user_unit_state", return_value=unit_state())
+        self.unit_reader = patcher.start()
+        self.addCleanup(patcher.stop)
 
     def process(self, start, ticks):
         fields = ["0"] * 22
@@ -111,6 +128,70 @@ class CollectorTests(unittest.TestCase):
         self.assertEqual(result["total"], 261)
         self.assertTrue(result["truncated"])
         self.assertIn("--user", run.call_args.args[0])
+
+    def test_current_unit_state_and_only_equal_nonempty_budget_phase_link(self):
+        # Saved phases keep their own date and never stand in for wrapper/native completion.
+        state = self.collector.state / "janitor"
+        state.mkdir(parents=True)
+        native = {"ended_at": "2020-01-01T00:00:00Z", "freed_kb": 7, "safety_integrity": "ok"}
+        (state / "last-run.json").write_text(json.dumps(native))
+        self.unit_reader.return_value = unit_state(active="activating", sub="start")
+        for saved_id, linked in (
+            (None, False), ("", False), ("legacy", False), ("c" * 32, False),
+            (INVOCATION, True), (INVOCATION.upper(), False), (True, False),
+        ):
+            phase = {"status": "cleaned", "generated_at": "2020-01-02T00:00:00Z",
+                     "cache_bytes": 123, "actions": [], "service_invocation_id": saved_id}
+            path = state / "maintenance-last.json"
+            raw = json.dumps(phase)
+            path.write_text(raw)
+            with self.subTest(saved_id=saved_id), mock.patch.object(
+                    d, "command", return_value="ActiveState=active\n"):
+                value = self.collector.maintenance()
+            self.assertEqual(value["maintenance_phase_linked"], linked)
+            self.assertEqual(value["maintenance"], phase)
+            self.assertEqual(value["last_run"], native)
+            self.assertEqual(value["service"]["active"], "activating")
+            self.assertEqual(value["timer"]["ActiveState"], "active")
+            self.assertEqual(path.read_text(), raw)
+        self.unit_reader.return_value = unit_state(invocation_id=None)
+        with mock.patch.object(d, "command", return_value="ActiveState=active\n"):
+            self.assertFalse(self.collector.maintenance()["maintenance_phase_linked"])
+        self.unit_reader.assert_called_with("system-janitor-catchup.service")
+
+    def test_unit_observation_gaps_preserve_saved_records_and_optional_installation(self):
+        # A failed live read is visible; missing optional installation is unavailable, not zero.
+        state = self.collector.state / "janitor"
+        state.mkdir(parents=True)
+        phase = {"status": "deferred", "cache_bytes": 123, "actions": []}
+        (state / "maintenance-last.json").write_text(json.dumps(phase))
+        for service, expected_status in (
+            (unit_state(status="unknown", load_state=None, active=None, sub=None, result=None,
+                        exit_status=None, invocation_id=None, error="timeout",
+                        detail="User-unit state read timed out after two seconds."), "degraded"),
+            (unit_state(status="unavailable", load_state="not-found", result=None,
+                        exit_status=None, invocation_id=None, detail="Optional unit not installed."), "healthy"),
+        ):
+            self.unit_reader.return_value = service
+            with self.subTest(status=service["status"]), \
+                    mock.patch.object(self.collector, "services", return_value={"items": []}), \
+                    mock.patch.object(self.collector, "containers", return_value={"status": "not_installed", "items": []}), \
+                    mock.patch.object(d, "command", return_value="ActiveState=active\n"):
+                value = self.collector.collect()
+            self.assertEqual(value["status"], expected_status)
+            self.assertEqual(value["janitor"]["service"], service)
+            self.assertEqual(value["janitor"]["maintenance"], phase)
+            self.assertIsNone(value["janitor"]["service"]["exit_status"])
+            self.assertFalse(value["janitor"]["maintenance_phase_linked"])
+            if service["status"] == "unknown":
+                self.assertIn("janitor_service", [error["source"] for error in value["errors"]])
+        self.unit_reader.return_value = unit_state(active="active", sub="running")
+        with mock.patch.object(d, "command", side_effect=subprocess.TimeoutExpired("systemctl", 2)):
+            value = self.collector.maintenance()
+        self.assertEqual(value["service"]["active"], "active")
+        self.assertEqual(value["maintenance"], phase)
+        self.assertIsNone(value["timer"])
+        self.assertTrue(value["timer_error"])
 
     def test_history_is_bounded(self):
         # A dashboard left open cannot create an ever-growing metrics database.
@@ -185,6 +266,282 @@ class AccessTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
+
+    def test_guarded_cleanup_real_endpoint_gates_dispatch_receipt_and_unknown_state(self):
+        # Cross the real HTTP/Controller boundary with fake unit reads and a fake start only.
+        actions = d.action_module()
+        state = Path(self.temp.name) / "action-state"
+        wake = mock.Mock()
+        controls = actions.Controller(state, mock.Mock(), mock.Mock(), mock.Mock(), wake)
+        token = d.secrets.token_urlsafe(32)
+        cache = d.Snapshot()
+        cache.publish({"actions": controls.describe()})
+        server = d.DashboardServer(("127.0.0.1", 0), d.handler_for(cache, token, controls))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            origin = f"http://127.0.0.1:{server.server_port}"
+            valid = {"Origin": origin, "Authorization": "Bearer " + token,
+                     "X-Action-Token": controls.nonce, "Content-Type": "application/json"}
+            cleanup = {"kind": "cleanup", "action": "run"}
+            def request(headers=valid, payload=None, duplicate_length=False):
+                body = json.dumps(cleanup if payload is None else payload)
+                client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                try:
+                    if duplicate_length:
+                        client.putrequest("POST", "/api/action")
+                        for key, value in headers.items():
+                            client.putheader(key, value)
+                        client.putheader("Content-Length", str(len(body)))
+                        client.putheader("Content-Length", str(len(body)))
+                        client.endheaders(body.encode())
+                    else:
+                        client.request("POST", "/api/action", body=body, headers=headers)
+                    response = client.getresponse()
+                    return response.status, json.loads(response.read())
+                finally:
+                    client.close()
+            def dispatch(args, **kwargs):
+                events = [json.loads(line) for line in (state / actions.AUDIT_NAME).read_text().splitlines()]
+                self.assertEqual(events[-1]["event"], "started")
+                self.assertEqual(events[-1]["target"], {"scope": "user", "unit": actions.CLEANUP_UNIT})
+                self.assertEqual(args, ["systemctl", "--user", "start", "--no-block", "--", actions.CLEANUP_UNIT])
+                self.assertEqual(kwargs["timeout"], 12)
+                return mock.Mock(returncode=0)
+            with mock.patch.object(actions, "user_unit_state", return_value=unit_state()) as read, \
+                    mock.patch.object(actions.subprocess, "run", side_effect=dispatch) as run:
+                for headers, status in (
+                    ({key: value for key, value in valid.items() if key != "Origin"}, 403),
+                    (dict(valid, Origin="https://foreign.invalid"), 403),
+                    (dict(valid, Host="foreign.invalid"), 403),
+                    (dict(valid, **{"Sec-Fetch-Site": "cross-site"}), 403),
+                    (dict(valid, **{"X-Action-Token": "expired-fixture"}), 403),
+                    ({key: value for key, value in valid.items() if key != "Authorization"}, 401),
+                    (dict(valid, **{"Content-Type": "text/plain"}), 415),
+                    (dict(valid, **{"Content-Length": "4097"}), 413),
+                    (dict(valid, **{"Content-Length": "0"}), 413),
+                    (dict(valid, **{"Content-Length": "bad"}), 400),
+                    (dict(valid, **{"Transfer-Encoding": "chunked"}), 400),
+                ):
+                    with self.subTest(status=status, headers=list(headers)):
+                        self.assertEqual(request(headers)[0], status)
+                self.assertEqual(request(duplicate_length=True)[0], 400)
+                for payload in (
+                    dict(cleanup, unit=actions.CLEANUP_UNIT), dict(cleanup, path="/tmp"),
+                    dict(cleanup, mode="force"), dict(cleanup, action="stop"),
+                ):
+                    self.assertEqual(request(payload=payload)[0], 400)
+                read.assert_not_called()
+                run.assert_not_called()
+                self.assertFalse(state.exists())
+                read.side_effect = [unit_state(), unit_state(active="activating", sub="start")]
+                status, result = request()
+                self.assertEqual(status, 200)
+                self.assertIs(result["dispatch_only"], True)
+                self.assertEqual(result["dispatch"]["status"], "accepted")
+                self.assertEqual(result["observation"]["active"], "activating")
+                self.assertRegex(result["observation"]["read_at"], r"Z$")
+                self.assertEqual(run.call_count, 1)
+                self.assertEqual(read.call_count, 2)
+                wake.assert_called_once_with()
+                read.side_effect = None
+                read.return_value = unit_state(active="active", sub="running")
+                # Trusted-LAN authentication policy remains tokenless, but still same-origin/nonce.
+                server.RequestHandlerClass = d.handler_for(cache, None, controls)
+                status, result = request({key: value for key, value in valid.items() if key != "Authorization"})
+                self.assertEqual(status, 200)
+                self.assertEqual(result["dispatch"]["status"], "already_running")
+                self.assertIs(result["dispatch"]["dispatched"], False)
+                self.assertEqual(run.call_count, 1)
+                gap = unit_state(status="unknown", active=None, sub=None, exit_status=None,
+                                 invocation_id=None, error="timeout", detail="Fixture state timeout.")
+                read.side_effect = [unit_state(), gap]
+                status, result = request()
+                self.assertEqual((status, result["outcome"]), (504, "unknown"))
+                self.assertIs(result["dispatch_only"], True)
+                self.assertEqual(result["dispatch"]["status"], "accepted")
+                self.assertEqual(result["observation"]["status"], "unknown")
+                self.assertEqual(run.call_count, 2)
+                self.assertEqual(wake.call_count, 3)
+                events = (state / actions.AUDIT_NAME).read_text()
+                self.assertNotIn(token, events)
+                self.assertNotIn(controls.nonce, events)
+                server.allowed_networks = [d.ipaddress.ip_network("192.168.1.0/24")]
+                with self.assertRaises((OSError, http.client.HTTPException)):
+                    request()
+                self.assertEqual(run.call_count, 2)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+    def test_cleanup_discovery_is_additive_and_keeps_read_only_defaults(self):
+        # Clients discover new powers without losing any prior capability contract.
+        output = subprocess.check_output(
+            [sys.executable, "-B", str(ROOT / "scripts/server-dashboard.py"), "--version", "--json"],
+            text=True, timeout=3,
+        )
+        value = json.loads(output)
+        old = {"authenticated-http", "cached-snapshot", "container-inventory-all", "control-actions",
+               "interactive-view", "lan-https", "loopback-only", "read-only", "snapshot-json",
+               "systemd-services", "trusted-lan-readonly"}
+        self.assertEqual(value["version"], "0.6.0")
+        self.assertEqual(set(value["capabilities"]), old | {"guarded-cleanup", "cleanup-job-state"})
+        self.assertEqual(value["capabilities"], sorted(value["capabilities"]))
+        self.assertEqual(len(value["capabilities"]), len(set(value["capabilities"])))
+        with mock.patch.dict(os.environ, {"XDG_CONFIG_HOME": str(Path(self.temp.name) / "defaults")}):
+            self.assertFalse(d.server_settings(d.argparse.Namespace(port=None, interval=None))["actions"])
+
+    def test_cleanup_real_signal_exit_returns_http_unknown_with_observation(self):
+        # Cross actual HTTP/Controller and original subprocess runner; never launch a host unit.
+        actions, original_run = d.action_module(), subprocess.run
+        state = Path(self.temp.name) / "signal-actions"
+        wake = mock.Mock()
+        controls = actions.Controller(state, mock.Mock(), mock.Mock(), mock.Mock(), wake)
+        server = d.DashboardServer(("127.0.0.1", 0), d.handler_for(d.Snapshot(), None, controls))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            headers = {"Origin": f"http://127.0.0.1:{server.server_port}",
+                       "Content-Type": "application/json", "X-Action-Token": controls.nonce}
+            for number in (signal.SIGTERM, signal.SIGKILL):
+                with self.subTest(signal=number):
+                    launched, starts = False, []
+                    def systemctl(args, **kwargs):
+                        nonlocal launched
+                        self.assertEqual(args[:2], ["systemctl", "--user"])
+                        self.assertEqual(args[-2:], ["--", actions.CLEANUP_UNIT])
+                        if args[2] == "show":
+                            raw = (
+                                f"Id={actions.CLEANUP_UNIT}\nLoadState=loaded\n"
+                                f"ActiveState={'activating' if launched else 'inactive'}\n"
+                                f"SubState={'start' if launched else 'dead'}\nResult=success\n"
+                                f"ExecMainStatus=0\nInvocationID={INVOCATION if launched else ''}\n"
+                                "CanStart=yes\nRefuseManualStart=no\n"
+                            ).encode()
+                            return original_run(
+                                [sys.executable, "-B", "-c",
+                                 f"import sys; sys.stdout.buffer.write({raw!r})"],
+                                **kwargs,
+                            )
+                        self.assertEqual(args, ["systemctl", "--user", "start", "--no-block",
+                                                "--", actions.CLEANUP_UNIT])
+                        self.assertEqual(json.loads((state / actions.AUDIT_NAME).read_text().splitlines()[-1])["event"],
+                                         "started")
+                        launched = True
+                        starts.append(args)
+                        result = original_run(
+                            [sys.executable, "-B", "-c",
+                             f"import os,signal; os.kill(os.getpid(), signal.{number.name})"], **kwargs,
+                        )
+                        self.assertEqual(result.returncode, -number)
+                        return result
+                    wake.reset_mock()
+                    client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                    try:
+                        with mock.patch.object(actions.subprocess, "run", side_effect=systemctl) as run:
+                            client.request("POST", "/api/action", body='{"kind":"cleanup","action":"run"}',
+                                           headers=headers)
+                            response = client.getresponse()
+                            body = json.loads(response.read())
+                    finally:
+                        client.close()
+                    self.assertEqual((response.status, body["outcome"]), (502, "unknown"))
+                    self.assertIs(body["ok"], False)
+                    self.assertIs(body["dispatch_only"], True)
+                    self.assertEqual(body["dispatch"]["status"], "unknown")
+                    self.assertIs(body["dispatch"]["dispatched"], True)
+                    self.assertEqual(body["observation"]["active"], "activating")
+                    self.assertEqual(body["observation"]["invocation_id"], INVOCATION)
+                    self.assertEqual(len(starts), 1)
+                    self.assertEqual([call.args[0][2] for call in run.call_args_list], ["show", "start", "show"])
+                    events = [json.loads(line) for line in (state / actions.AUDIT_NAME).read_text().splitlines()]
+                    self.assertEqual([event["event"] for event in events[-2:]], ["started", "unknown"])
+                    self.assertEqual(events[-1]["observation"], body["observation"])
+                    self.assertNotIn("rejected", json.dumps(events))
+                    wake.assert_called_once_with()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+
+    def test_cleanup_real_decode_failure_returns_json_before_and_after_launch(self):
+        # Byte0xff comes from real child stdout through original text=True decoding, not a fake exception.
+        actions, original_run = d.action_module(), subprocess.run
+        state = Path(self.temp.name) / "decode-actions"
+        wake = mock.Mock()
+        controls = actions.Controller(state, mock.Mock(), mock.Mock(), mock.Mock(), wake)
+        server = d.DashboardServer(("127.0.0.1", 0), d.handler_for(d.Snapshot(), None, controls))
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            headers = {"Origin": f"http://127.0.0.1:{server.server_port}",
+                       "Content-Type": "application/json", "X-Action-Token": controls.nonce}
+            for phase in ("prelaunch", "postlaunch"):
+                with self.subTest(phase=phase):
+                    launched, starts = False, []
+                    def systemctl(args, **kwargs):
+                        nonlocal launched
+                        self.assertEqual(args[:2], ["systemctl", "--user"])
+                        self.assertEqual(args[-2:], ["--", actions.CLEANUP_UNIT])
+                        if args[2] == "show":
+                            self.assertIs(kwargs["text"], True)
+                            self.assertIs(kwargs["capture_output"], True)
+                            self.assertEqual(kwargs["timeout"], 2)
+                            raw = (
+                                f"Id={actions.CLEANUP_UNIT}\nLoadState=loaded\nActiveState=inactive\n"
+                                "SubState=dead\nResult=success\nExecMainStatus=0\nInvocationID=\n"
+                                "CanStart=yes\nRefuseManualStart=no\n"
+                            ).encode()
+                            code = ("import os; os.write(1, bytes([255]))" if phase == "prelaunch" or launched
+                                    else f"import sys; sys.stdout.buffer.write({raw!r})")
+                            return original_run(
+                                [sys.executable, "-B", "-c", code], **kwargs,
+                            )
+                        self.assertEqual(args, ["systemctl", "--user", "start", "--no-block",
+                                                "--", actions.CLEANUP_UNIT])
+                        self.assertEqual(json.loads((state / actions.AUDIT_NAME).read_text().splitlines()[-1])["event"],
+                                         "started")
+                        starts.append(args)
+                        launched = True
+                        return original_run([sys.executable, "-B", "-c", "pass"], **kwargs)
+                    wake.reset_mock()
+                    client = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=3)
+                    try:
+                        with mock.patch.object(actions.subprocess, "run", side_effect=systemctl) as run:
+                            client.request("POST", "/api/action", body='{"kind":"cleanup","action":"run"}',
+                                           headers=headers)
+                            response = client.getresponse()
+                            body = json.loads(response.read())
+                    finally:
+                        client.close()
+                    self.assertEqual(response.status, 503)
+                    self.assertIs(body["ok"], False)
+                    self.assertIs(body["dispatch_only"], True)
+                    self.assertEqual(body["outcome"], "failed" if phase == "prelaunch" else "unknown")
+                    self.assertEqual(body["dispatch"]["status"],
+                                     "not_dispatched" if phase == "prelaunch" else "accepted")
+                    self.assertIs(body["dispatch"]["dispatched"], phase == "postlaunch")
+                    self.assertEqual((body["observation"]["status"], body["observation"]["error"]),
+                                     ("unknown", "malformed"))
+                    self.assertRegex(body["observation"]["read_at"], r"Z$")
+                    self.assertIsNone(body["observation"]["exit_status"])
+                    self.assertIn("decod", body["observation"]["detail"].lower())
+                    self.assertEqual(len(starts), 0 if phase == "prelaunch" else 1)
+                    self.assertEqual([call.args[0][2] for call in run.call_args_list],
+                                     ["show"] if phase == "prelaunch" else ["show", "start", "show"])
+                    events = [json.loads(line) for line in (state / actions.AUDIT_NAME).read_text().splitlines()]
+                    self.assertEqual([event["event"] for event in events[-2:]],
+                                     ["started", "failed" if phase == "prelaunch" else "unknown"])
+                    self.assertEqual(events[-1]["observation"], body["observation"])
+                    self.assertNotIn("0xff", json.dumps(events))
+                    wake.assert_called_once_with()
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
 
     def tls_pair(self):
         cert, key = Path(self.temp.name) / "server.crt", Path(self.temp.name) / "server.key"

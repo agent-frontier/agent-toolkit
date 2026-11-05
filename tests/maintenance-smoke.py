@@ -499,6 +499,44 @@ class MaintenanceTests(unittest.TestCase):
             self.call(mode="status")
         self.assertFalse(self.state.exists())
 
+    def test_service_invocation_metadata(self):
+        # Optional execution context links only the budget phase, without changing policy or atomic writes.
+        valid = "b" * 32
+        before = None
+        real_replace = os.replace
+        for context, expected in (
+            (valid, valid), (valid.upper(), valid), (None, None), ("", None),
+            ("b" * 31, None), ("b" * 33, None), ("z" * 32, None),
+            (" " + valid, None), (valid + "\n", None), ("NaN", None),
+        ):
+            replacements = []
+            def observe_replace(source, target):
+                if target == self.state / "maintenance-last.json":
+                    self.assertEqual(json.loads(source.read_text())["service_invocation_id"], expected)
+                    self.assertEqual(source.stat().st_mode & 0o777, 0o600)
+                    if before is not None:
+                        self.assertEqual(json.loads(target.read_text()), before)
+                    replacements.append((source, target))
+                return real_replace(source, target)
+            with self.subTest(context=context), patch.dict(os.environ), \
+                    patch.object(m.os, "replace", side_effect=observe_replace), \
+                    patch.object(m.shutil, "disk_usage", return_value=types.SimpleNamespace(free=20*m.GIB)):
+                os.environ.pop("INVOCATION_ID", None)
+                if context is not None:
+                    os.environ["INVOCATION_ID"] = context
+                doc, code = self.call()
+            self.assertEqual(code, 0)
+            self.assertEqual(doc["service_invocation_id"], expected)
+            self.assertEqual(doc["actions"], [])
+            self.assertEqual(doc["removed_bytes"], 0)
+            self.assertEqual(doc["observed_reclaimed_bytes"], 0)
+            self.assertEqual(doc["cache_budget_bytes"], 2*m.GIB)
+            self.assertEqual(json.loads((self.state / "maintenance-last.json").read_text()), doc)
+            self.assertEqual(len(replacements), 1)
+            self.assertFalse(list(self.state.glob("maintenance-last.json.tmp.*")))
+            self.assertNotIn("service_invocation_id", json.loads((self.state / "maintenance.jsonl").read_text().splitlines()[-1]))
+            before = doc
+
     def test_naive_cleanup_timestamp_does_not_disable_cooldown(self):
         self.state.mkdir()
         (self.state / "maintenance-last.json").write_text(

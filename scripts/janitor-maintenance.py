@@ -535,8 +535,10 @@ def main(args):
     remaining = cleanup_cooldown(previous, args)
     activity = Activity()
     caches, cache_total = scan_caches(policy, activity)
+    invocation = os.environ.get("INVOCATION_ID", "")
     doc = {
         "version": 1, "generated_at": utc(), "status": "idle", "mode": args.mode,
+        "service_invocation_id": invocation.lower() if re.fullmatch(r"[0-9A-Fa-f]{32}", invocation) else None,
         "cache_budget_bytes": policy["total_cache_budget_gib"] * GIB,
         "cache_bytes": cache_total, "caches": caches, "workspaces": [], "actions": [],
         "errors": [], "removed_bytes": 0, "observed_reclaimed_bytes": 0,
