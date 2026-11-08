@@ -1236,3 +1236,362 @@ test("DP3 storage explains only cached coverage, budgets and protection; missing
   assert.equal(nodes.get("cache").textContent, "Unknown");
   assert.equal(requests.filter(url => url !== "/api/snapshot").length, 0);
 });
+
+function storageMetadata(enabled = true) {
+  return {supported: true, api_version: 1, enabled, available: true, capabilities: ["storage-scan"],
+    roots: [{id: "home", label: "Home"}, {id: "root", label: "Root filesystem"}, {id: "tmp", label: "/tmp"}],
+    limits: {wall_seconds: 120, max_directories: 128}};
+}
+
+function storageFixture(changes = {}) {
+  return {...storageMetadata(), read_at: new Date().toISOString(), job: {
+    id: "a".repeat(32), root: "home", directory_id: "b".repeat(32), state: "complete",
+    breadcrumbs: [{id: "b".repeat(32), name: "Home"}], elapsed_seconds: 1.5,
+    started_at: "2026-11-08T00:00:00Z", finished_at: "2026-11-08T00:00:02Z",
+    root_bytes: 100, direct_bytes: 5, coverage: "complete",
+    directories: [
+      {id: "c".repeat(32), name: "large <img onerror=bad>", bytes: 75, navigable: true, detail: null},
+      {id: "d".repeat(32), name: "small\\nfolder", bytes: 15, navigable: true, detail: null},
+    ],
+    omitted_directories: {count: 2, bytes: 5}, warning_count: 0, warning_sample: "",
+    permission_denied: false, stdout_bytes: 100, stderr_bytes: 0, error: null, error_code: null,
+    ...changes,
+  }};
+}
+
+async function storageApplication(view = storageFixture()) {
+  const app = application(), value = maintenanceFixture();
+  value.storage_scan = storageMetadata(view.enabled);
+  app.pending.shift()(snapshotResponse(value));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.fetchCalls.at(-1).url, "/api/storage-scan");
+  app.pending.shift()(snapshotResponse(view));
+  await new Promise(resolve => setImmediate(resolve));
+  return {...app, value};
+}
+
+function storageViewText(app) {
+  return ["storage-state", "storage-total", "storage-date", "storage-coverage", "storage-error", "storage-directories"]
+    .map(id => app.nodes.get(id).textContent);
+}
+
+test("DS1 real Storage DOM has fixed presets, explicit controls and a proportional decorative map plus ranked routes", async () => {
+  // Execute actual app/HTML and numerical SVG areas; native 390px touch geometry remains a parent field gate.
+  const app = await storageApplication(), {nodes, document, fetchCalls} = app;
+  assert.equal(nodes.get("storage-root").tagName, "SELECT");
+  assert.deepEqual(nodes.get("storage-root").children.map(node => node.getAttribute("value")), ["home", "root", "tmp"]);
+  assert.equal(nodes.get("storage-start").tagName, "BUTTON");
+  assert.equal(nodes.get("storage-cancel").tagName, "BUTTON");
+  assert.equal(nodes.get("storage-map").getAttribute("role"), "img");
+  assert.equal(nodes.get("storage-map").getAttribute("viewBox"), "0 0 1000 500");
+  assert.match(nodes.get("storage-state").textContent, /complete/i);
+  assert.match(nodes.get("storage-coverage").textContent, /allocated.*not reclaimable/i);
+  assert.match(nodes.get("storage-date").textContent, /2026/);
+  const buttons = document.querySelectorAll("button[data-directory-id]")
+    .filter(node => nodes.get("storage-directories").contains(node));
+  assert.deepEqual(buttons.map(node => node.getAttribute("data-directory-id")), ["c".repeat(32), "d".repeat(32)]);
+  assert.match(buttons[0].textContent, /large <img onerror=bad>/);
+  assert.equal(document.querySelectorAll("img").length, 0);
+  const tiles = document.querySelectorAll("rect[data-bytes]");
+  assert.equal(tiles.length, 4);
+  for (const tile of tiles) {
+    const area = Number(tile.getAttribute("width")) * Number(tile.getAttribute("height"));
+    assert.ok(Math.abs(area / 500000 - Number(tile.getAttribute("data-bytes")) / 100) < 1e-9);
+    assert.equal(tile.events.click, undefined); // Tiny tiles are never the only navigation control.
+  }
+  const css = fs.readFileSync(path.join(__dirname, "../dashboard/style.css"), "utf8");
+  assert.match(css, /\.storage-directory[^}]*min-height:\s*44px/);
+  assert.match(css, /#storage-map[^}]*width:\s*100%/);
+  assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 0);
+});
+
+test("DS1 legacy, malformed metadata and observer modes never make unsupported or automatic scan requests", () => {
+  // Feature detection protects old backends while preserving their original workload choices and Storage jump.
+  for (const metadata of [undefined, {...storageMetadata(), api_version: 2}, {...storageMetadata(), capabilities: []}]) {
+    const app = application();
+    app.context.value = maintenanceFixture(); app.context.value.storage_scan = metadata;
+    vm.runInContext("render(value, receiptFixture()); refreshStorage();", app.context);
+    assert.equal(app.fetchCalls.filter(call => call.url.startsWith("/api/storage-scan")).length, 0);
+    assert.equal(app.nodes.get("storage-start").disabled, true);
+    assert.match(app.nodes.get("storage-support").textContent, /not advertised|unsupported/i);
+    assert.equal(app.nodes.get("storage-heading").getAttribute("tabindex"), "-1");
+  }
+  const app = application();
+  app.context.value = maintenanceFixture(); app.context.value.actions.enabled = false;
+  app.context.value.storage_scan = storageMetadata(false);
+  vm.runInContext("render(value, receiptFixture());", app.context);
+  app.nodes.get("storage-start").events.click();
+  assert.equal(app.fetchCalls.filter(call => call.options?.method === "POST").length, 0);
+  assert.equal(app.nodes.get("storage-start").disabled, true);
+  assert.match(app.nodes.get("storage-support").textContent, /observer|disabled/i);
+});
+
+test("DS1 explicit preset, drill and Back post exactly one current-job ID and never paths", async () => {
+  // Directory labels are untrusted display text; only the cached opaque IDs authorize a new read-only scan.
+  const app = await storageApplication(), {nodes, fetchCalls, pending} = app;
+  nodes.get("storage-root").value = "tmp";
+  nodes.get("storage-root").events.change();
+  assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 0);
+  nodes.get("storage-start").events.click(); nodes.get("storage-start").events.click();
+  assert.equal(fetchCalls.at(-1).url, "/api/storage-scan/start");
+  assert.deepEqual(JSON.parse(fetchCalls.at(-1).options.body), {root: "tmp"});
+  pending.shift()(snapshotResponse(storageFixture({root: "tmp", state: "starting"})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fetchCalls.at(-1).url, "/api/storage-scan");
+  pending.shift()(snapshotResponse(storageFixture({root: "tmp"})));
+  await new Promise(resolve => setImmediate(resolve));
+  const oldButton = app.document.querySelectorAll("button[data-directory-id]")
+    .find(node => node.getAttribute("data-directory-id") === "c".repeat(32));
+  oldButton.events.click();
+  assert.deepEqual(JSON.parse(fetchCalls.at(-1).options.body),
+    {job_id: "a".repeat(32), directory_id: "c".repeat(32)});
+  pending.shift()(snapshotResponse(storageFixture({state: "starting"})));
+  await new Promise(resolve => setImmediate(resolve));
+  const drilled = storageFixture({id: "e".repeat(32), directory_id: "f".repeat(32),
+    breadcrumbs: [{id: "1".repeat(32), name: "/tmp"}, {id: "f".repeat(32), name: "large <img onerror=bad>"}]});
+  pending.shift()(snapshotResponse(drilled));
+  await new Promise(resolve => setImmediate(resolve));
+  const posts = fetchCalls.filter(call => call.options?.method === "POST").length;
+  oldButton.events.click(); // A retained stale DOM event cannot smuggle a previous result ID.
+  assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, posts);
+  assert.equal(nodes.get("storage-back").disabled, false);
+  nodes.get("storage-back").events.click();
+  assert.deepEqual(JSON.parse(fetchCalls.at(-1).options.body),
+    {job_id: "e".repeat(32), directory_id: "1".repeat(32)});
+  assert.equal(fetchCalls.filter(call => call.url === "/api/action").length, 0);
+  assert.ok(fetchCalls.filter(call => call.options?.method === "POST")
+    .every(call => call.options.headers["X-Action-Token"] === app.value.actions.nonce));
+});
+
+test("DS1 Cancel shows cancelling until a fresh terminal read and cannot free or replay the scan slot", async () => {
+  // A receipt is not finalization; only the cached manager state can make another Scan available.
+  const app = await storageApplication(storageFixture({state: "running", finished_at: null})), {nodes, fetchCalls, pending} = app;
+  assert.equal(nodes.get("storage-start").disabled, true);
+  nodes.get("storage-cancel").events.click(); nodes.get("storage-cancel").events.click();
+  assert.equal(fetchCalls.at(-1).url, "/api/storage-scan/cancel");
+  assert.deepEqual(JSON.parse(fetchCalls.at(-1).options.body), {job_id: "a".repeat(32)});
+  pending.shift()(snapshotResponse(storageFixture({state: "cancelling", finished_at: null})));
+  await new Promise(resolve => setImmediate(resolve));
+  pending.shift()(snapshotResponse(storageFixture({state: "cancelling", finished_at: null})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(nodes.get("storage-state").textContent, /cancelling/i);
+  assert.equal(nodes.get("storage-start").disabled, true);
+  assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 1);
+  vm.runInContext("refreshStorage(true);", app.context);
+  pending.shift()(snapshotResponse(storageFixture({state: "cancelled", root_bytes: null, direct_bytes: null, coverage: "lower_bound"})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(nodes.get("storage-state").textContent, /cancelled/i);
+  assert.equal(nodes.get("storage-start").disabled, false);
+  assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 1);
+});
+
+for (const failure of ["success", "HTTP", "JSON"]) {
+  test(`DS1 Pause discards delayed automatic storage ${failure} publication after await`, async () => {
+    // Pause must freeze the actual separate storage read, including error/quality text, not merely snapshot polling.
+    const app = await storageApplication(), before = storageViewText(app);
+    automaticSnapshot(app);
+    app.pending.shift()(snapshotResponse(app.value));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(app.fetchCalls.at(-1).url, "/api/storage-scan");
+    app.nodes.get("live-toggle").events.click();
+    const response = failure === "HTTP" ? {ok: false, status: 503} :
+      failure === "JSON" ? {ok: true, status: 200, json: async () => { throw Error("fixture torn JSON"); }} :
+        snapshotResponse(storageFixture({root_bytes: 999, state: "partial", coverage: "lower_bound"}));
+    app.pending.shift()(response);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(storageViewText(app), before);
+    assert.equal(app.nodes.get("live-toggle").textContent, "Resume updates");
+    assert.equal(app.fetchCalls.filter(call => call.options?.method === "POST").length, 0);
+  });
+}
+
+test("DS1 manual paused refresh queues its own fresh storage GET behind a discarded automatic read", async () => {
+  // Do not relabel a delayed automatic response as manual or leave the independent read slot occupied.
+  const app = await storageApplication();
+  automaticSnapshot(app);
+  app.pending.shift()(snapshotResponse(app.value));
+  await new Promise(resolve => setImmediate(resolve));
+  const automatic = app.pending.shift();
+  app.nodes.get("live-toggle").events.click();
+  app.nodes.get("refresh-now").events.click();
+  app.pending.shift()(snapshotResponse(app.value));
+  await new Promise(resolve => setImmediate(resolve));
+  const count = app.fetchCalls.filter(call => call.url === "/api/storage-scan").length;
+  automatic({ok: false, status: 503});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.fetchCalls.filter(call => call.url === "/api/storage-scan").length, count + 1);
+  app.pending.shift()(snapshotResponse(storageFixture({state: "partial", coverage: "lower_bound", permission_denied: true,
+    warning_count: 51, warning_sample: "Permission denied; vanished during scan"})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.match(app.nodes.get("storage-state").textContent, /partial/i);
+  assert.match(app.nodes.get("storage-coverage").textContent, /51|Permission/);
+  assert.equal(app.nodes.get("live-toggle").textContent, "Resume updates");
+});
+
+test("DS1 explicit paused Scan with a lost reply reads once, retains Pause and never automatically replays POST", async () => {
+  // Transport uncertainty is not rejection or permission to retry an expensive operation.
+  const app = await storageApplication(), {nodes, pending, fetchCalls} = app;
+  nodes.get("live-toggle").events.click();
+  nodes.get("storage-start").events.click();
+  pending.shift()({ok: true, status: 202, json: async () => { throw Error("fixture reply lost"); }});
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(fetchCalls.at(-1).url, "/api/storage-scan");
+  pending.shift()(snapshotResponse(storageFixture({state: "partial", coverage: "lower_bound"})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(nodes.get("live-toggle").textContent, "Resume updates");
+  assert.match(nodes.get("storage-error").textContent, /no automatic replay/i);
+  assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 1);
+  assert.equal(app.timers.size, 0);
+});
+
+test("DS1 failed traversal root zero stays unknown; omitted directories and direct bytes stay distinct", async () => {
+  // A failed root traversal must not render 0 B/full-disk success or a reclaimable-space promise.
+  const app = await storageApplication(storageFixture({state: "partial", coverage: "lower_bound",
+    root_bytes: null, direct_bytes: null, directories: [], omitted_directories: {count: 0, bytes: 0},
+    warning_count: 1, warning_sample: "Permission denied", permission_denied: true}));
+  assert.match(app.nodes.get("storage-total").textContent, /Unknown/i);
+  assert.doesNotMatch(app.nodes.get("storage-total").textContent, /\b0 B\b/);
+  assert.match(app.nodes.get("storage-coverage").textContent, /lower.bound|permission/i);
+  assert.match(app.nodes.get("storage-map-note").textContent, /unknown|no measured/i);
+  assert.equal(app.document.querySelectorAll("rect[data-bytes]").length, 0);
+});
+
+test("DS1 ranked directory focus survives cached redraw and falls back to Storage after current-job identity changes", async () => {
+  // Keyboard users must not lose their route when automatic publication rebuilds the ranked list.
+  const app = await storageApplication();
+  const button = app.document.querySelectorAll("button[data-directory-id]")
+    .find(node => node.getAttribute("data-directory-id") === "c".repeat(32));
+  button.focus();
+  vm.runInContext("refreshStorage(true);", app.context);
+  app.pending.shift()(snapshotResponse(storageFixture()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.document.activeElement.getAttribute("data-directory-id"), "c".repeat(32));
+  vm.runInContext("refreshStorage(true);", app.context);
+  // Keep the new empty result's accounting valid so this exercises focus, not the malformed-view guard.
+  app.pending.shift()(snapshotResponse(storageFixture({id: "e".repeat(32), directory_id: "f".repeat(32),
+    breadcrumbs: [{id: "f".repeat(32), name: "Home"}], directories: [],
+    root_bytes: 4096, direct_bytes: 4096, omitted_directories: {count: 0, bytes: 0}})));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(app.document.activeElement.getAttribute("id"), "storage-heading");
+});
+
+test("DS1 Storage puts visual results before collapsed dates, method and diagnostics", async () => {
+  // Native 390px evidence found prose burying the map. Prove actual-app DOM order here;
+  // the parent separately proves viewport geometry, not this lightweight DOM fixture.
+  const app = await storageApplication(storageFixture({state: "partial", coverage: "lower_bound",
+    elapsed_seconds: 115.6, warning_count: 8, permission_denied: true, warning_sample: "Permission denied"}));
+  const order = [];
+  const visit = node => { order.push(node); node.children.forEach(visit); };
+  visit(app.document.body);
+  const position = id => order.indexOf(app.nodes.get(id));
+  const verbose = ["storage-support", "storage-date", "storage-coverage", "storage-map-note", "storage-buckets", "storage-warnings"];
+  for (const id of verbose) {
+    assert.ok(position("storage-map") < position(id) && position("storage-directories") < position(id),
+      `${id} must follow the map and ranked directories, not bury visual results`);
+  }
+  const details = app.nodes.get("storage-details");
+  assert.equal(details.tagName, "DETAILS");
+  assert.equal(details.getAttribute("open"), null);
+  assert.equal(details.children[0].tagName, "SUMMARY");
+  for (const id of verbose) assert.equal(app.nodes.get(id).closest("details"), details);
+  for (const id of ["storage-root", "storage-start", "storage-cancel", "storage-back",
+    "storage-state", "storage-total", "storage-visual-warning", "storage-error"]) {
+    assert.ok(position(id) < position("storage-map"), `${id} must stay ahead of the visual result`);
+    assert.equal(app.nodes.get(id).closest("details"), null);
+  }
+  const warning = app.nodes.get("storage-visual-warning");
+  assert.equal(warning.closest("[hidden]"), null);
+  assert.match(warning.textContent, /lower.bound/i);
+  assert.match(warning.textContent, /permission|unreadable/i);
+  assert.match(app.nodes.get("storage-state").textContent, /PARTIAL/);
+  assert.equal(app.nodes.get("storage-heading").textContent, "Storage usage");
+  assert.equal(app.document.querySelectorAll("button[data-directory-id]")
+    .filter(button => app.nodes.get("storage-directories").contains(button)).length, 2);
+});
+
+function storageAcceptedB(state = "starting") {
+  const value = storageFixture({id: "e".repeat(32), directory_id: "f".repeat(32),
+    breadcrumbs: [{id: "f".repeat(32), name: "Home"}], state});
+  if (state !== "complete") Object.assign(value.job, {finished_at: null, root_bytes: null,
+    direct_bytes: null, directories: [], omitted_directories: {count: 0, bytes: 0},
+    coverage: "unknown", elapsed_seconds: 0});
+  return value;
+}
+
+function storageAcceptedResponse(value) {
+  return {...snapshotResponse(value), status: 202};
+}
+
+test("DS1 known accepted B stays cancellable while paused cached reads fail, without receipt completion or stale A", async () => {
+  // Unlike a lost reply, a validated accepted ID is known. A failed/new or delayed/old GET must not erase it.
+  for (const reportedState of ["starting", "complete"]) {
+    for (const earlierRead of [false, true]) {
+      const app = await storageApplication(), {nodes, pending, fetchCalls} = app;
+      nodes.get("live-toggle").events.click();
+      let stale = null;
+      if (earlierRead) {
+        vm.runInContext("refreshStorage(true);", app.context);
+        stale = pending.shift(); // This manual read began before B was accepted, even though Pause is on.
+      }
+      nodes.get("storage-start").events.click();
+      pending.shift()(storageAcceptedResponse(storageAcceptedB(reportedState)));
+      await new Promise(resolve => setImmediate(resolve));
+      if (stale) {
+        stale(snapshotResponse(storageFixture())); // Old completed A is not a fresh observation of accepted B.
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      assert.equal(fetchCalls.at(-1).url, "/api/storage-scan");
+      pending.shift()({ok: false, status: 503});
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(nodes.get("storage-scan").getAttribute("data-job-id"), "e".repeat(32));
+      assert.equal(nodes.get("storage-scan").getAttribute("data-state"), "starting");
+      assert.equal(nodes.get("storage-scan").getAttribute("data-state-source"), "accepted_receipt");
+      assert.equal(nodes.get("storage-start").disabled, true);
+      assert.equal(nodes.get("storage-cancel").disabled, false);
+      assert.match(nodes.get("storage-state").textContent, /accepted.*unverified/i);
+      assert.match(nodes.get("storage-date").textContent, /accepted/i);
+      assert.match(nodes.get("storage-total").textContent, /Unknown/);
+      assert.equal(nodes.get("storage-directories").children.length, 0);
+      assert.equal(nodes.get("live-toggle").textContent, "Resume updates");
+      assert.equal(app.timers.size, 0);
+      assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 1);
+      nodes.get("storage-cancel").events.click();
+      assert.equal(fetchCalls.at(-1).url, "/api/storage-scan/cancel");
+      assert.deepEqual(JSON.parse(fetchCalls.at(-1).options.body), {job_id: "e".repeat(32)});
+      pending.shift()(storageAcceptedResponse(storageAcceptedB("cancelling")));
+      await new Promise(resolve => setImmediate(resolve));
+      pending.shift()({ok: false, status: 503});
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(nodes.get("storage-scan").getAttribute("data-job-id"), "e".repeat(32));
+      assert.equal(nodes.get("storage-scan").getAttribute("data-state"), "cancelling");
+      assert.equal(nodes.get("storage-start").disabled, true);
+      assert.equal(nodes.get("live-toggle").textContent, "Resume updates");
+      assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 2); // Both explicit user intents.
+    }
+  }
+});
+
+test("DS1 a newer root edit during delayed Home POST survives its receipt and makes the next Scan tmp", async () => {
+  // An accepted earlier request describes its own target; it cannot consume a later operator selection.
+  const app = await storageApplication(), {nodes, pending, fetchCalls} = app;
+  nodes.get("storage-root").value = "home";
+  nodes.get("storage-root").events.change();
+  nodes.get("storage-start").events.click();
+  assert.deepEqual(JSON.parse(fetchCalls.at(-1).options.body), {root: "home"});
+  assert.equal(nodes.get("storage-root").disabled, false); // Match the actual editable dropdown UX.
+  nodes.get("storage-root").value = "tmp";
+  nodes.get("storage-root").events.change();
+  assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 1);
+  pending.shift()(storageAcceptedResponse(storageAcceptedB()));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(nodes.get("storage-root").value, "tmp");
+  pending.shift()(snapshotResponse(storageAcceptedB("complete")));
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(nodes.get("storage-scan").getAttribute("data-state-source"), "cached_read");
+  assert.equal(nodes.get("storage-root").value, "tmp");
+  assert.equal(nodes.get("storage-start").disabled, false);
+  nodes.get("storage-start").events.click();
+  assert.equal(fetchCalls.at(-1).url, "/api/storage-scan/start");
+  assert.deepEqual(JSON.parse(fetchCalls.at(-1).options.body), {root: "tmp"});
+  assert.equal(fetchCalls.filter(call => call.options?.method === "POST").length, 2);
+});

@@ -14,6 +14,19 @@ let actionHistoryBusy = false;
 let actionHistoryManualPending = false;
 let actionHistoryError = "";
 let unlinkedAttempt = "";
+let storageView = null;
+let storageViewSource = "none";
+let storageReadEpoch = 0;
+let storageReadBusy = false;
+let storageManualPending = false;
+let storagePostBusy = false;
+let storageReadError = "";
+let storageRequestError = "";
+let storagePresetPending = true;
+let storagePresetRevision = 0;
+const storageRoots = ["home", "root", "tmp"];
+const storageActive = new Set(["starting", "running", "cancelling", "finalization_failed"]);
+const storageStates = new Set([...storageActive, "complete", "partial", "failed", "cancelled", "timed_out"]);
 const CLEANUP_UNIT = "system-janitor-catchup.service";
 const cleanupRunning = new Set(["active", "activating", "deactivating", "reloading", "refreshing"]);
 const detailHeadings = {Service: "services-heading", Process: "processes-heading",
@@ -252,6 +265,249 @@ async function refreshActionHistory(manual = false) {
     actionHistoryManualPending = false;
     if (manualPending) refreshActionHistory(true);
   }
+}
+function storageManifest(value) {
+  return value?.supported === true && value.api_version === 1 &&
+    typeof value.enabled === "boolean" && typeof value.available === "boolean" &&
+    Array.isArray(value.capabilities) && value.capabilities.includes("storage-scan") &&
+    value.limits?.max_directories === 128 && Number.isFinite(value.limits.wall_seconds) && value.limits.wall_seconds > 0 &&
+    Array.isArray(value.roots) && value.roots.length === 3 &&
+    storageRoots.every(id => value.roots.filter(root => root?.id === id).length === 1);
+}
+function storageFeature() { return storageManifest(snapshot?.storage_scan); }
+function storageAllowed() {
+  return storageFeature() && snapshot.storage_scan.enabled && snapshot.storage_scan.available &&
+    snapshot.actions?.enabled === true && typeof snapshot.actions.nonce === "string" && !!snapshot.actions.nonce;
+}
+function validStorageView(value) {
+  if (!storageManifest(value) || typeof value.read_at !== "string" || !Number.isFinite(Date.parse(value.read_at))) return false;
+  const job = value.job;
+  if (job === null) return true;
+  const id = value => typeof value === "string" && /^[0-9a-f]{32}$/.test(value);
+  const size = value => Number.isSafeInteger(value) && value >= 0;
+  const name = value => typeof value === "string" && value.length > 0 && value.length <= 4096;
+  if (!job || !id(job.id) || !id(job.directory_id) || !storageRoots.includes(job.root) || !storageStates.has(job.state) ||
+      !Number.isFinite(job.elapsed_seconds) || job.elapsed_seconds < 0 ||
+      typeof job.started_at !== "string" || !Number.isFinite(Date.parse(job.started_at)) ||
+      (job.finished_at !== null && (typeof job.finished_at !== "string" || !Number.isFinite(Date.parse(job.finished_at)))) ||
+      !["complete", "lower_bound", "unknown"].includes(job.coverage) ||
+      (job.root_bytes !== null && !size(job.root_bytes)) || (job.direct_bytes !== null && !size(job.direct_bytes)) ||
+      !Array.isArray(job.directories) || job.directories.length > 128 ||
+      !Array.isArray(job.breadcrumbs) || !job.breadcrumbs.length || job.breadcrumbs.length > 64 ||
+      job.breadcrumbs.some(crumb => !id(crumb?.id) || !name(crumb.name)) ||
+      job.breadcrumbs.at(-1).id !== job.directory_id ||
+      job.directories.some(row => !row || !name(row.name) || !size(row.bytes) ||
+        typeof row.navigable !== "boolean" || (row.navigable ? !id(row.id) : row.id !== null)) ||
+      !size(job.omitted_directories?.count) || !size(job.omitted_directories.bytes) ||
+      !size(job.warning_count) || typeof job.warning_sample !== "string" || job.warning_sample.length > 16384 ||
+      typeof job.permission_denied !== "boolean") return false;
+  const subtotal = job.directories.reduce((total, row) => total + row.bytes, job.omitted_directories.bytes);
+  return size(subtotal) && (job.root_bytes === null ||
+    (job.direct_bytes !== null && size(subtotal + job.direct_bytes) && subtotal + job.direct_bytes === job.root_bytes));
+}
+function acceptStorageReceipt(value, route) {
+  // A validated acknowledgement preserves its exact ID, not completion or measured results.
+  // Keep Cancel usable for a known accepted job even if its separate cached GET fails.
+  storageView = {...value, job: {...value.job,
+    state: route === "/api/storage-scan/cancel" ? "cancelling" : "starting",
+    finished_at: null, root_bytes: null, direct_bytes: null, directories: [],
+    omitted_directories: {count: 0, bytes: 0}, coverage: "unknown", display_truncated: false,
+    exit_code: null, error: null, error_code: null}};
+  storageViewSource = "accepted_receipt";
+  storageReadEpoch++; // Reads begun before this accepted pointer cannot restore an older job.
+  storageReadError = "";
+}
+function drawStorageMap(job, rootBytes) {
+  $("storage-map").replaceChildren();
+  const omitted = job?.omitted_directories;
+  const tiles = (job?.directories || []).filter(row => row.bytes > 0).map(row => ({name: row.name, bytes: row.bytes}));
+  if (omitted?.bytes > 0) tiles.push({name: `Other directories (${omitted.count})`, bytes: omitted.bytes});
+  if (rootBytes !== null && job?.direct_bytes > 0) tiles.push({name: "Direct files, symlinks & directory metadata", bytes: job.direct_bytes});
+  const total = tiles.reduce((sum, tile) => sum + tile.bytes, 0);
+  text("storage-map-note", !total ? "No measured nonzero allocations; root coverage may be unknown." :
+    rootBytes === null ? `Root total unknown. Map compares only ${bytes(total)} of reported directory allocations; direct bytes are unknown.` :
+    `Map proportions: ${bytes(total)} measured allocations, not filesystem capacity or reclaimable bytes. Ranked buttons below are the navigation route.`);
+  if (!total) return;
+  const colors = ["#81b9ff", "#88e0b1", "#f0bf74", "#b9a7e8", "#78c5cc", "#c8d889"];
+  let color = 0;
+  const draw = (items, x, y, width, height) => {
+    if (items.length === 1) {
+      const tile = items[0], group = document.createElementNS("http://www.w3.org/2000/svg", "g");
+      group.setAttribute("aria-hidden", "true");
+      const rect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+      for (const [key, value] of Object.entries({x, y, width, height, "data-bytes": tile.bytes, fill: colors[color++ % colors.length]})) rect.setAttribute(key, String(value));
+      const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
+      title.textContent = `${tile.name}: ${bytes(tile.bytes)} allocated`;
+      group.append(title, rect);
+      if (width >= 90 && height >= 30) {
+        const label = document.createElementNS("http://www.w3.org/2000/svg", "text");
+        label.setAttribute("x", String(x + 8)); label.setAttribute("y", String(y + 24));
+        label.textContent = [...tile.name].slice(0, Math.min(45, Math.floor(width / 12))).join("");
+        group.append(label);
+      }
+      $("storage-map").append(group); return;
+    }
+    const sum = items.reduce((value, tile) => value + tile.bytes, 0);
+    let split = 1, left = items[0].bytes;
+    while (split < items.length - 1 && Math.abs(left + items[split].bytes - sum / 2) < Math.abs(left - sum / 2)) left += items[split++].bytes;
+    const ratio = left / sum;
+    if (width >= height) {
+      draw(items.slice(0, split), x, y, width * ratio, height);
+      draw(items.slice(split), x + width * ratio, y, width * (1 - ratio), height);
+    } else {
+      draw(items.slice(0, split), x, y, width, height * ratio);
+      draw(items.slice(split), x, y + height * ratio, width, height * (1 - ratio));
+    }
+  };
+  draw(tiles, 0, 0, 1000, 500);
+}
+function renderStorage() {
+  const feature = storageFeature(), allowed = storageAllowed(), job = storageView?.job;
+  const accepted = storageViewSource === "accepted_receipt";
+  const focused = document.activeElement, focusedId = focused?.getAttribute("data-directory-id");
+  const focus = focusedId ? {id: focusedId, job: focused.getAttribute("data-job-id")} : null;
+  $("storage-explorer").hidden = !feature;
+  text("storage-support", !feature ? "On-demand storage scans are not advertised by this backend; unsupported requests are disabled." :
+    !snapshot.storage_scan.enabled || !snapshot.actions?.enabled ? "Observer mode: starting storage scans is disabled. Cached results remain view-only." :
+    !snapshot.storage_scan.available ? snapshot.storage_scan.detail || "GNU du unavailable; no fallback scan." :
+    "Explicit read-only scans only, up to 120s. Files are never opened for content. Selecting a preset alone does not scan.");
+  if (!$("storage-root").value) $("storage-root").value = "home";
+  if (!storagePresetPending && job) $("storage-root").value = job.root;
+  const busy = storageActive.has(job?.state);
+  $("storage-start").disabled = !allowed || storagePostBusy || busy;
+  $("storage-cancel").disabled = !allowed || storagePostBusy || !["starting", "running", "finalization_failed"].includes(job?.state);
+  text("storage-cancel", job?.state === "finalization_failed" ? "Retry cancellation" : "Cancel scan");
+  $("storage-back").disabled = !allowed || storagePostBusy || busy || (job?.breadcrumbs.length || 0) < 2;
+  $("storage-scan").setAttribute("data-state", job?.state || "idle");
+  $("storage-scan").setAttribute("data-job-id", job?.id || "");
+  $("storage-scan").setAttribute("data-state-source", storageViewSource);
+  $("storage-state").setAttribute("aria-busy", String(busy));
+  text("storage-state", job ? accepted ? `${job.state.toUpperCase()} / accepted request; current state unverified.` :
+    `${job.state.toUpperCase()} / ${job.elapsed_seconds.toFixed(1)}s elapsed${job.state === "finalization_failed" ? "; ownership retained, another scan is blocked" : ""}` : "Not scanned");
+  text("storage-date", job ? accepted ? `Request accepted ${when(storageView.read_at)}. Cached job state and completion are not yet verified.` :
+    `Started ${when(job.started_at)} / ${job.finished_at ? `finished ${when(job.finished_at)}` : "not finalized"}. Server read ${when(storageView.read_at)}.` : "No scan result yet.");
+  const rootBytes = !job || (job.root_bytes === 0 && job.state !== "complete") ? null : job.root_bytes;
+  text("storage-total", `Measured root allocations: ${bytes(rootBytes)}`);
+  text("storage-coverage", !job ? "Coverage unknown; refresh reads cached state only. Scan is a separate explicit operation." :
+    `Coverage: ${job.coverage === "complete" ? "complete traversal of this pinned directory on one filesystem, at scan time" :
+      job.coverage === "lower_bound" ? "partial / lower-bound traversal" : "unknown"}. ` +
+    `${job.warning_count} diagnostic lines${job.permission_denied ? "; permission denied under the current user, no elevation" : ""}. ` +
+    `${job.directories.length} displayed directories; ${job.omitted_directories.count} omitted and summed separately. ` +
+    "Proportions describe measured allocated bytes, not reclaimable space or the entire physical filesystem. Changing trees are not an atomic inventory.");
+  text("storage-error", [storageRequestError, storageReadError, job?.error].filter(Boolean).join(" "));
+  $("storage-error").hidden = !$("storage-error").textContent;
+  $("storage-breadcrumbs").replaceChildren();
+  (job?.breadcrumbs || []).forEach(crumb => {
+    const button = document.createElement("button");
+    button.type = "button"; button.className = "secondary"; button.textContent = crumb.name;
+    button.setAttribute("data-directory-id", crumb.id); button.setAttribute("data-job-id", job.id);
+    button.setAttribute("aria-label", `Scan breadcrumb directory: ${crumb.name} (read-only)`);
+    if (crumb.id === job.directory_id) button.setAttribute("aria-current", "location");
+    button.disabled = !allowed || storagePostBusy || busy || crumb.id === job.directory_id;
+    button.addEventListener("click", () => storageNavigate(crumb.id, job.id));
+    $("storage-breadcrumbs").append(button);
+  });
+  $("storage-directories").replaceChildren();
+  [...(job?.directories || [])].sort((a, b) => b.bytes - a.bytes || a.name.localeCompare(b.name)).forEach(item => {
+    const li = document.createElement("li"), button = document.createElement("button");
+    button.type = "button"; button.className = "storage-directory";
+    const name = document.createElement("span"), size = document.createElement("span");
+    name.textContent = item.name; size.textContent = bytes(item.bytes); size.className = "storage-size";
+    button.append(name, size);
+    button.setAttribute("aria-label", `Scan directory: ${item.name}, ${bytes(item.bytes)} allocated (read-only)`);
+    if (item.id) {
+      button.setAttribute("data-directory-id", item.id); button.setAttribute("data-job-id", job.id);
+      button.addEventListener("click", () => storageNavigate(item.id, job.id));
+    }
+    button.disabled = !allowed || storagePostBusy || busy || !item.navigable;
+    li.append(button);
+    if (item.detail) {
+      const detail = document.createElement("p"); detail.className = "muted"; detail.textContent = item.detail; li.append(detail);
+    }
+    $("storage-directories").append(li);
+  });
+  list("storage-buckets", job ? [
+    `Other directories (${job.omitted_directories.count} omitted): ${bytes(job.omitted_directories.bytes)} allocated; not a drill-down target.`,
+    `Direct files, symlinks & directory metadata: ${bytes(rootBytes === null ? null : job.direct_bytes)}. Separate from directory subtotals; not file-content inspection.`,
+  ] : [], "No measured buckets yet.");
+  text("storage-warnings", job ? `Native exit: ${job.exit_code ?? "not finalized"}. ${job.warning_sample || "No native diagnostic output."}${job.warning_truncated ? "\nDiagnostic sample capped; further lines were drained, not stored." : ""}` : "No scan diagnostics yet.");
+  drawStorageMap(job, rootBytes);
+  if (focus) {
+    const matching = [...document.querySelectorAll("button[data-directory-id]")].find(button =>
+      button.getAttribute("data-directory-id") === focus.id && button.getAttribute("data-job-id") === focus.job && canFocus(button));
+    (matching || $("storage-heading")).focus();
+  }
+}
+async function refreshStorage(manual = false) {
+  if (!storageFeature() || (paused && !manual)) return;
+  if (storageReadBusy) { if (manual) storageManualPending = true; return; }
+  storageReadBusy = true;
+  const readEpoch = storageReadEpoch;
+  let publish = false;
+  try {
+    const response = await fetch("/api/storage-scan", {method: "GET", cache: "no-store",
+      headers: token ? {Authorization: "Bearer " + token} : {}, signal: AbortSignal.timeout(10000)});
+    if (!response.ok) throw new Error(`Storage state unavailable (HTTP ${response.status})`);
+    const value = await response.json();
+    if (!validStorageView(value)) throw new Error("Malformed storage state");
+    if (readEpoch !== storageReadEpoch || !storageFeature() || (paused && !manual)) return;
+    storageView = value; storageViewSource = "cached_read"; storageReadError = ""; publish = true;
+  } catch (error) {
+    if (readEpoch === storageReadEpoch && storageFeature() && (!paused || manual)) {
+      storageReadError = storageViewSource === "accepted_receipt" ?
+        `${error.message}. Accepted job ${storageView.job.id} retained; state/completion unverified. No automatic replay.` :
+        `${error.message}. Previous dated scan, if any, retained; refresh reads state only, never starts or replays a scan.`;
+      publish = true;
+    }
+  } finally {
+    storageReadBusy = false;
+    if (publish && (!paused || manual)) renderStorage();
+    const queued = storageManualPending; storageManualPending = false;
+    if (queued) refreshStorage(true); // A new manual GET, not promotion of a delayed automatic response.
+  }
+}
+async function storageRequest(route, payload) {
+  if (!storageAllowed() || storagePostBusy) return;
+  const presetRevision = storagePresetRevision;
+  storagePostBusy = true; storageRequestError = ""; renderStorage();
+  try {
+    const headers = {"Content-Type": "application/json", "X-Action-Token": snapshot.actions.nonce};
+    if (token) headers.Authorization = "Bearer " + token;
+    const response = await fetch(route, {method: "POST", headers, body: JSON.stringify(payload),
+      cache: "no-store", signal: AbortSignal.timeout(10000)});
+    const value = await response.json();
+    if (!response.ok) {
+      storageRequestError = `Storage request rejected (HTTP ${response.status}): ${value.error || "unavailable"}. No automatic replay.`;
+    } else {
+      if (!validStorageView(value) || !value.job) throw new Error("Storage request receipt unavailable");
+      acceptStorageReceipt(value, route);
+      if (payload.root && presetRevision === storagePresetRevision) storagePresetPending = false;
+    }
+  } catch (error) {
+    storageRequestError = `${error.message}. Request outcome may be unknown; no automatic replay. Refresh state before a new explicit intent.`;
+  } finally {
+    storagePostBusy = false; renderStorage();
+    refreshStorage(true); // Explicit Scan/Cancel reads once and never changes Pause.
+  }
+}
+function storageNavigate(identifier, jobId) {
+  const job = storageView?.job;
+  if (!storageAllowed() || storagePostBusy || storageActive.has(job?.state)) return;
+  if (!job || jobId !== job.id || ![...job.breadcrumbs, ...job.directories.filter(row => row.navigable)].some(row => row.id === identifier)) {
+    storageRequestError = "Directory result changed; refresh for current server-issued IDs. No scan started."; renderStorage(); return;
+  }
+  storagePresetPending = false;
+  storageRequest("/api/storage-scan/start", {job_id: job.id, directory_id: identifier});
+}
+function startStorage() {
+  if (!storageAllowed() || storagePostBusy || storageActive.has(storageView?.job?.state)) return;
+  if (!storagePresetPending && storageView?.job) return storageNavigate(storageView.job.directory_id, storageView.job.id);
+  const root = $("storage-root").value;
+  if (storageRoots.includes(root)) storageRequest("/api/storage-scan/start", {root});
+}
+function cancelStorage() {
+  const job = storageView?.job;
+  if (["starting", "running", "finalization_failed"].includes(job?.state)) storageRequest("/api/storage-scan/cancel", {job_id: job.id});
 }
 function receiptFor(response, requestedAt) {
   const receivedAt = performance.now(), date = response.headers?.get?.("Date");
@@ -685,6 +941,7 @@ function render(value, receipt = null) {
   text("uptime", uptime == null ? "Unknown" : `${Math.floor(uptime / 86400)}d ${Math.floor(uptime / 3600) % 24}h`);
   text("swap", `Swap ${bytes(system.swap_used_bytes)} / ${bytes(system.swap_total_bytes)}`);
   renderMaintenance();
+  renderStorage();
   $("filesystems").replaceChildren(...(value.filesystems || []).map(disk => row([disk.mount, bytes(disk.available_bytes), pct(disk.used_percent), disk.inode_used_percent == null ? "Unknown" : pct(disk.inode_used_percent)], ["Mount", "Available", "Used", "Inodes"])));
   if (!value.filesystems) $("filesystems").append(row(["Storage source unavailable", "", "", ""]));
   $("network").replaceChildren();
@@ -723,6 +980,7 @@ async function refresh(manual = false) {
     if (paused && !manual) return;
     render(value, receipt);
     refreshActionHistory(manual);
+    refreshStorage(manual);
     const age = observationAge(value.generated_at);
     if (!Number.isFinite(age)) { badge("connection", "Age unknown / stale", false); notice("Server-relative snapshot age evidence is unavailable. Refresh for authoritative time evidence; guarded cleanup stays disabled."); }
     else if (age > (value.stale_after_seconds || 20)) { badge("connection", "Stale data", false); notice(`Last observation is ${Math.round(age)} seconds old; the collector may be delayed.`); }
@@ -764,6 +1022,13 @@ $("action-run").addEventListener("click", runAction);
 $("action-cancel").addEventListener("click", cancelAction);
 $("cleanup-details").addEventListener("click", event => openMaintenance(false, event?.currentTarget));
 $("cleanup-run").addEventListener("click", event => openMaintenance(true, event?.currentTarget));
+$("storage-root").addEventListener("change", () => { storagePresetRevision++; storagePresetPending = true; });
+$("storage-start").addEventListener("click", startStorage);
+$("storage-cancel").addEventListener("click", cancelStorage);
+$("storage-back").addEventListener("click", () => {
+  const job = storageView?.job;
+  if (job?.breadcrumbs.length > 1) storageNavigate(job.breadcrumbs.at(-2).id, job.id);
+});
 document.querySelectorAll("[data-section-jump]").forEach(link => link.addEventListener("click", event => {
   const heading = $(link.getAttribute("data-section-jump"));
   event.preventDefault(); heading.focus({preventScroll: true}); heading.scrollIntoView({block: "start"});

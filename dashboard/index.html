@@ -52,7 +52,29 @@
         <section class="panel"><div class="section-heading"><div><p class="eyebrow">MAINTENANCE</p><h2 id="maintenance-heading" tabindex="-1">Janitor &amp; build guard</h2></div><span id="maintenance-status" class="badge">Unknown</span></div>
           <dl id="maintenance-summary"></dl><div id="maintenance-actions"></div><div class="filters"><button id="cleanup-run" type="button" class="danger" hidden disabled>Run guarded cleanup</button><button id="cleanup-details" type="button" class="secondary">View last cleanup</button></div><p id="cleanup-policy" class="muted"></p><details><summary>Saved protection &amp; deferral records</summary><ul id="protected"></ul></details>
         </section>
-        <section class="panel"><div class="section-heading"><div><p class="eyebrow">STORAGE</p><h2 id="storage-heading" tabindex="-1">Mounted filesystems</h2></div></div><div class="table-wrap identity-table"><table><thead><tr><th>Mount</th><th>Available</th><th>Used</th><th>Inodes</th></tr></thead><tbody id="filesystems"></tbody></table></div>
+        <section class="panel"><div class="section-heading"><div><p class="eyebrow">STORAGE</p><h2 id="storage-heading" tabindex="-1">Storage usage</h2></div></div>
+          <div id="storage-scan" data-state="idle">
+            <div id="storage-explorer" hidden>
+              <div class="filters list-controls"><label class="sr-only" for="storage-root">Next scan location</label><select id="storage-root"><option value="home">Home</option><option value="root">Root filesystem</option><option value="tmp">/tmp</option></select><button id="storage-start" type="button" disabled>Scan</button><button id="storage-cancel" type="button" class="secondary" disabled>Cancel scan</button></div>
+              <div class="storage-navigation"><button id="storage-back" type="button" class="secondary" disabled>Back</button><nav id="storage-breadcrumbs" aria-label="Scanned directory breadcrumbs"></nav></div>
+              <div class="storage-readout"><p id="storage-state" role="status" aria-live="polite">Not scanned</p><p id="storage-total">Measured root allocations: Unknown</p></div>
+              <p class="muted">Allocated space, not reclaimable.</p>
+              <p id="storage-visual-warning" class="muted" role="note">Partial/unknown: lower-bound allocations. Unreadable (permission) or changing paths may be missing.</p>
+              <p id="storage-error" role="status" hidden></p>
+              <svg id="storage-map" viewBox="0 0 1000 500" role="img" aria-label="Proportional map of measured allocated bytes; use the ranked directory buttons to navigate"></svg>
+              <ol id="storage-directories" aria-label="Largest immediate directories, descending allocated size"></ol>
+            </div>
+            <p id="storage-unavailable" class="muted">On-demand directory scanning isn't advertised by this backend. Mounted and cached observations remain available.</p>
+            <details id="storage-details"><summary>Scan details / dates, coverage &amp; diagnostics</summary>
+              <p id="storage-support" class="muted">On-demand storage scans are not advertised by this backend.</p>
+              <p id="storage-date" class="muted">No scan result yet.</p>
+              <p id="storage-coverage" class="muted">Coverage unknown. A scan is explicit; ordinary refresh never starts one.</p>
+              <p id="storage-map-note" class="muted">No measured allocations yet.</p>
+              <ul id="storage-buckets"></ul>
+              <pre id="storage-warnings">No scan diagnostics yet.</pre>
+            </details>
+          </div>
+          <h3>Mounted filesystems (separate availability)</h3><div class="table-wrap identity-table"><table><thead><tr><th>Mount</th><th>Available</th><th>Used</th><th>Inodes</th></tr></thead><tbody id="filesystems"></tbody></table></div>
           <h3>Cached cleanup context</h3><dl id="storage-summary"></dl><ul id="storage-caches"></ul>
           <p id="storage-explanation" class="muted">A soft budget is not deletion permission or an estimate of reclaimable bytes. Previously reclaimed bytes are not available to reclaim again. Root free space and artifact deletion metrics are separate; never add or subtract these overlapping categories. Saved lists are not complete disk attribution. Maintenance shows separately dated budget/native results and unit execution.</p>
           <h3>Network throughput</h3><div id="network" class="table-wrap"></div>

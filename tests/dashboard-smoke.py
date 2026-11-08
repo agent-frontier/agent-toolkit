@@ -15,6 +15,7 @@ import socketserver
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest import mock
 
@@ -414,10 +415,10 @@ class AccessTests(unittest.TestCase):
         old = {"authenticated-http", "cached-snapshot", "container-inventory-all", "control-actions",
                "interactive-view", "lan-https", "loopback-only", "read-only", "snapshot-json",
                "systemd-services", "trusted-lan-readonly"}
-        self.assertEqual(value["version"], "0.7.0")
+        self.assertEqual(value["version"], "0.8.0")
         self.assertEqual(set(value["capabilities"]), old | {
             "guarded-cleanup", "cleanup-job-state", "action-history",
-            "observed-action-state", "workload-recovery",
+            "observed-action-state", "workload-recovery", "storage-scan",
         })
         self.assertEqual(value["capabilities"], sorted(value["capabilities"]))
         self.assertEqual(len(value["capabilities"]), len(set(value["capabilities"])))
@@ -1003,6 +1004,187 @@ class AccessTests(unittest.TestCase):
             server.shutdown()
             server.server_close()
             thread.join(timeout=3)
+
+
+class StorageAccessTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix="dashboard-storage-http-")
+        self.addCleanup(self.temp.cleanup)
+        self.roots = {name: Path(self.temp.name) / name for name in ("home", "root", "tmp")}
+        for path in self.roots.values():
+            path.mkdir()
+        self.storage = d.storage_module()
+        self.scanner = self.storage.StorageScanner(enabled=True, roots=self.roots, wall_seconds=2)
+        self.addCleanup(self.scanner.close)
+        self.controls = mock.Mock(nonce="fixture-storage-nonce")
+        self.token = "fixture-private-access-" + "a" * 40
+        self.cache = d.Snapshot()
+        self.cache.publish({"status": "healthy", "actions": {"enabled": True, "nonce": self.controls.nonce}})
+        self.server = d.DashboardServer(("127.0.0.1", 0),
+                                       d.handler_for(self.cache, self.token, self.controls, self.scanner))
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.addCleanup(self.close_http)
+        self.headers = {"Authorization": "Bearer " + self.token,
+                        "Origin": f"http://127.0.0.1:{self.server.server_port}",
+                        "Content-Type": "application/json", "X-Action-Token": self.controls.nonce}
+
+    def close_http(self):
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=3)
+        self.assertFalse(self.thread.is_alive())
+
+    def request(self, path="/api/storage-scan", method="GET", payload=None, headers=None):
+        client = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        body = json.dumps(payload) if isinstance(payload, (dict, list)) else payload
+        try:
+            client.request(method, path, body=body, headers=self.headers if headers is None else headers)
+            response = client.getresponse()
+            raw = response.read()
+            return response.status, json.loads(raw) if raw else None, dict(response.getheaders())
+        finally:
+            client.close()
+
+    def wait_job(self):
+        deadline = time.monotonic() + 4
+        while time.monotonic() < deadline:
+            status, value, _ = self.request()
+            self.assertEqual(status, 200)
+            if value["job"]["state"] in {"complete", "partial", "failed", "cancelled", "timed_out"}:
+                return value["job"]
+            time.sleep(0.005)
+        self.fail("owned HTTP fixture failed to finalize")
+
+    def test_storage_discovery_cached_get_head_and_sampler_never_spawn(self):
+        # The original handler serves cheap cached metadata, never a scan on GET/HEAD/snapshot.
+        with mock.patch.object(self.storage.subprocess, "Popen") as launch:
+            for method in ("GET", "HEAD"):
+                status, value, headers = self.request(method=method)
+                self.assertEqual(status, 200)
+                self.assertEqual(headers["Cache-Control"], "no-store")
+                if method == "GET":
+                    self.assertIsNone(value["job"])
+                    self.assertTrue(value["supported"])
+                    self.assertEqual(value["capabilities"], ["storage-scan"])
+                    self.assertEqual(value["api_version"], 1)
+            status, snapshot, _ = self.request("/api/snapshot")
+            self.assertEqual(status, 200)
+            self.assertTrue(snapshot["storage_scan"]["supported"])
+            self.assertNotIn("job", snapshot["storage_scan"])
+            self.assertEqual([root["id"] for root in snapshot["storage_scan"]["roots"]], ["home", "root", "tmp"])
+            self.assertIsNone(self.scanner._worker)
+            launch.assert_not_called()
+        self.controls.execute.assert_not_called()
+        self.server.RequestHandlerClass = d.handler_for(self.cache, self.token, self.controls)
+        self.assertEqual(self.request()[0], 404)
+        self.assertNotIn("storage_scan", self.request("/api/snapshot")[1])
+
+    def test_storage_post_original_shared_intake_gates_prevent_spawn(self):
+        # Storage must cross the same auth/Origin/opt-in/nonce/type/length/JSON prefix as /api/action.
+        valid = self.headers
+        bad = [
+            ({key: value for key, value in valid.items() if key != "Origin"}, 403),
+            (dict(valid, Origin="https://foreign.invalid"), 403),
+            (dict(valid, Host="foreign.invalid"), 403),
+            (dict(valid, **{"Sec-Fetch-Site": "cross-site"}), 403),
+            ({key: value for key, value in valid.items() if key != "Authorization"}, 401),
+            (dict(valid, **{"X-Action-Token": "expired"}), 403),
+            (dict(valid, **{"Content-Type": "text/plain"}), 415),
+            (dict(valid, **{"Content-Length": "4097"}), 413),
+            (dict(valid, **{"Content-Length": "0"}), 413),
+            (dict(valid, **{"Content-Length": "not-decimal"}), 400),
+            (dict(valid, **{"Transfer-Encoding": "chunked", "Content-Length": "2"}), 400),
+        ]
+        with mock.patch.object(self.storage.subprocess, "Popen") as launch:
+            for route in ("/api/storage-scan/start", "/api/storage-scan/cancel"):
+                for headers, expected in bad:
+                    with self.subTest(route=route, expected=expected):
+                        self.assertEqual(self.request(route, "POST", {"root": "home"}, headers)[0], expected)
+                for payload in ("{bad", "[]", '{"root":"home","path":"/etc"}', '{"command":"du"}'):
+                    self.assertEqual(self.request(route, "POST", payload)[0], 400)
+            client = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+            try:
+                client.putrequest("POST", "/api/storage-scan/start")
+                for key, value in valid.items():
+                    client.putheader(key, value)
+                client.putheader("Content-Length", "2")
+                client.putheader("Content-Length", "2")
+                client.endheaders(b"{}")
+                response = client.getresponse()
+                response.read()
+                self.assertEqual(response.status, 400)
+            finally:
+                client.close()
+            self.server.RequestHandlerClass = d.handler_for(self.cache, self.token, None, self.scanner)
+            self.assertEqual(self.request("/api/storage-scan/start", "POST", {"root": "home"})[0], 403)
+            self.server.RequestHandlerClass = d.handler_for(self.cache, self.token, self.controls, self.scanner)
+            self.scanner.enabled = False
+            self.assertEqual(self.request("/api/storage-scan/start", "POST", {"root": "home"})[0], 403)
+            launch.assert_not_called()
+        self.controls.execute.assert_not_called()
+
+    def test_storage_real_http_start_drill_stale_ids_and_action_separation(self):
+        # Nonempty real HTTP requests must reach original du; navigation authority comes only from cached IDs.
+        folder = self.roots["home"] / "folder"
+        (folder / "nested").mkdir(parents=True)
+        (folder / "nested/file").write_bytes(b"x" * 9000)
+        self.assertEqual(self.request("/api/storage-scan/start", "POST", {"root": "home"})[0], 202)
+        first = self.wait_job()
+        self.assertEqual(first["state"], "complete")
+        self.assertGreater(first["root_bytes"], 9000)
+        child = first["directories"][0]
+        self.assertEqual(self.request("/api/storage-scan/start", "POST", {
+            "job_id": first["id"], "directory_id": child["id"],
+        })[0], 202)
+        second = self.wait_job()
+        self.assertEqual([crumb["name"] for crumb in second["breadcrumbs"]], ["Home", "folder"])
+        with mock.patch.object(self.storage.subprocess, "Popen") as launch:
+            self.assertEqual(self.request("/api/storage-scan/start", "POST", {
+                "job_id": first["id"], "directory_id": child["id"],
+            })[0], 409)
+            folder.rename(folder.with_name("old"))
+            folder.mkdir()
+            self.assertEqual(self.request("/api/storage-scan/start", "POST", {
+                "job_id": second["id"], "directory_id": second["directory_id"],
+            })[0], 409)
+            launch.assert_not_called()
+        self.controls.execute.assert_not_called()
+        self.assertEqual(self.request("/api/storage-scan?root=home")[0], 404)
+        self.assertEqual(self.request("/api/storage-scan/start")[0], 404)
+        self.assertEqual(self.request("/api/storage-scan/start", "DELETE")[0], 405)
+
+    def test_storage_real_delayed_http_responsiveness_cancel_and_no_journal_or_log_payload(self):
+        # Actual delayed Popen, not CompletedProcess, proves a prompt POST and independent ordinary HTTP reads.
+        original = subprocess.Popen
+        children = []
+
+        def launch(argv, **kwargs):
+            child = original([sys.executable, "-B", "-c", "import time; time.sleep(10)"], **kwargs)
+            children.append(child)
+            return child
+
+        with mock.patch.object(self.storage.subprocess, "Popen", side_effect=launch), \
+                mock.patch.object(d.logging, "info") as log:
+            before = time.monotonic()
+            status, value, _ = self.request("/api/storage-scan/start", "POST", {"root": "tmp"})
+            self.assertEqual(status, 202)
+            self.assertLess(time.monotonic() - before, 0.3)
+            job_id = value["job"]["id"]
+            before = time.monotonic()
+            self.assertEqual(self.request("/api/snapshot")[0], 200)
+            self.assertEqual(self.request()[0], 200)
+            self.assertLess(time.monotonic() - before, 0.3)
+            self.assertEqual(self.request("/api/storage-scan/start", "POST", {"root": "home"})[0], 409)
+            self.assertEqual(self.request("/api/storage-scan/cancel", "POST", {"job_id": "f" * 32})[0], 409)
+            self.assertEqual(self.request("/api/storage-scan/cancel", "POST", {"job_id": job_id})[0], 202)
+            self.assertEqual(self.wait_job()["state"], "cancelled")
+            self.assertEqual(len(children), 1)
+            self.assertIsNotNone(children[0].returncode)
+            self.assertNotIn(self.controls.nonce, str(log.call_args_list))
+            self.assertNotIn(job_id, str(log.call_args_list))
+            self.assertNotIn(self.token, str(log.call_args_list))
+        self.controls.execute.assert_not_called()
 
 
 if __name__ == "__main__":

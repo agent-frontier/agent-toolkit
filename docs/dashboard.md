@@ -125,10 +125,11 @@ CPU may exceed 100% for multithreaded work. Memory uses kernel `MemAvailable`;
 disk availability excludes filesystem-reserved space, matching `df` semantics.
 Storage covers root plus an allowlist of local disk filesystem types,
 deduplicated by device and capped at 30 mounts; it is not every virtual or
-network mount and nothing is recursively measured.
+network mount. This ordinary sampler does not recursively measure directories.
 
 Up to 360 observations stay in memory and disappear on restart. There are no
-recursive `du` calls or growing metrics files. Cached Go usage is explicitly the
+recursive `du` calls in collection or growing metrics files. The separate
+directory explorer below scans only on explicit intent. Cached Go usage is explicitly the
 last Janitor observation, not a new scan. Missing first-run records are unknown;
 malformed/oversized JSON, non-object record roots, invalid rendered maintenance
 fields, inaccessible systemd scopes and failed container queries are shown as
@@ -224,6 +225,123 @@ application health; **request receipts** describe the API attempt independently.
 Known exact state still supports retained user-service Start after Stop.
 Older/partial backend metadata is labelled, preserves legacy fixed controls and
 does not authorize unsupported cleanup/recovery requests or history reads.
+
+## On-demand directory usage (DirStat-style)
+
+Tap **Storage**, choose **Home**, **Root filesystem** or **/tmp**, then **Scan**.
+Choosing a preset alone starts nothing. A background scan produces a proportional
+map and a descending list of the largest immediate directories. Each directory's
+size includes its recursive contents. Tap a **ranked directory button** to start
+a new, explicit read-only scan of that directory; **Back** and the breadcrumb
+buttons similarly rescan an ancestor. The small map tiles are decorative, not
+tiny navigation targets. Controls and ranked routes have at least44px targets.
+
+Scanning uses the existing opt-in controls/nonce and access policy. On the
+already-enabled LAN installation it requires no new login or setup.
+**Observer mode explicitly disables starting scans**; cached results can still
+be inspected. Old/partial backend metadata does not authorize scan requests.
+There is no deletion, cleanup-policy change, root elevation or file-content
+browser. GNU `du` reads directory entries and allocation metadata, **never file
+contents**. The service remains the same current-user NoNewPrivileges service;
+its existing128MiB/32-task limits, TLS, CIDRs and profile stay unchanged.
+
+**What is measured:** allocated bytes on one filesystem, not apparent file
+length, `df` capacity/free space or reclaimable space. Sparse files can have large
+logical lengths and small allocations. Hardlinks are counted once within a scan;
+which directory receives a shared file's allocation can depend on traversal
+order. Child symlinks are not followed, nor are other filesystems traversed.
+The chosen directory is pinned with a no-follow directory fd; only that argument
+is dereferenced by GNU `du`. Current-job opaque directory IDs are revalidated
+through no-follow path components and matching device/inode identities before
+another process can start. A renamed/replaced path or stale result fails closed;
+choose a preset for a new measurement of its current identity.
+
+**Bounded view, full reported totals:** one worker/owned process at a time,
+120-second default traversal budget, at most128 largest immediate directories,
+at most64 path components and a4KiB native diagnostic sample. Native output is
+drained rather than accumulated; totals include reported omitted directories.
+**Other directories** aggregates those omitted rows. **Direct files, symlinks &
+directory metadata** is the reported root total minus all immediate-directory
+totals. These buckets do not overlap. Navigation stores only bounded ancestor
+identities and the current result, not a deep tree. Do not add a root to its
+children, combine repeated scans, or subtract these allocations from filesystem
+availability or saved cleanup budgets to invent a reclaim total.
+
+Permission and disappearance warnings produce a **dated PARTIAL/lower-bound**
+view. Even a successful traversal is a dated, non-atomic measurement of a
+changing tree, not complete physical-filesystem attribution. A failed traversal
+with a reported root of0 has an **unknown** root total, not an empty disk.
+An absent root record, malformed output, missing tooling, signal exit or failed
+output setup is explicit rather than a success-shaped zero.
+
+**Cancel scan** targets only the owned child/process group. The UI shows
+**CANCELLING** until finalization/reaping succeeds; the traversal deadline and
+shutdown use the same cleanup boundary. Cleanup may take additional bounded
+grace/reap time after the traversal budget. **FINALIZATION_FAILED** retains
+ownership and blocks another scan; **Retry cancellation** explicitly retries
+cleanup of that same child, never launches a replacement. No request is
+automatically replayed, including when a reply is lost. **Refresh now** reads
+cached scan state, not a new scan.
+
+A validated acceptance response retains its exact job ID as a **request receipt,
+not scan completion**. If the following cached GET fails, Cancel can still
+target that known accepted job; state/finalization remain explicitly unverified
+and another Scan stays blocked. Only a successful cached read publishes measured
+results or terminal state. An older in-flight read cannot restore the previous
+job over this accepted pointer. A lost/unusable reply is different: no job ID is
+invented and the request is never automatically replayed.
+
+The next-scan location stays editable during a request. A newer preset choice
+is retained for the next explicit Scan; an earlier response does not overwrite
+it or start the newly selected location automatically.
+
+Pause freezes automatic storage publication after the awaited read, just as it
+does snapshots and action history; the server-side scan can continue. Explicit
+Scan/Cancel and a manual Refresh read state once and **remain paused**. A manual
+read queued behind an automatic read gets its own fresh GET.
+
+### Storage API (version1)
+
+Discovery `storage-scan` is additive. Served snapshots contain cheap
+`storage_scan` metadata: `supported`, `api_version:1`, `enabled`, `available`,
+`capabilities:["storage-scan"]`, the three fixed `roots`, `limits` and optional
+availability `detail`. Metadata contains **no job/tree**. Import, initialization,
+sampling, `--snapshot`, GET and HEAD never start a scan.
+
+- `GET /api/storage-scan` returns metadata plus `read_at` and `job:null` or the
+  cached current job. It requires the existing GET Host/Origin/auth checks.
+- `POST /api/storage-scan/start`: exactly `{"root":"home"}` (or `"root"`/`"tmp"`)
+  **or** `{"job_id":"…","directory_id":"…"}` from the current cached result.
+- `POST /api/storage-scan/cancel`: exactly `{"job_id":"…"}` for the current scan.
+- Both POSTs share `/api/action`'s mandatory Origin/auth/controls/nonce,
+  JSON content type, single explicit1..4096-byte body length and JSON intake
+  prefix. No arbitrary paths, commands, extra fields or stale IDs are accepted.
+  Accepted requests promptly return202 with the cached view, **not** an action
+  receipt or completion promise. The scanner is not an irreversible action kind;
+  scan results and nonces are not written to the action journal or HTTP logs.
+
+Job IDs and directory IDs are32 lowercase hex characters. A job contains `id`,
+`root`, `directory_id`, `breadcrumbs:[{id,name}]`, `state`, `started_at`,
+`finished_at` (null until finalized), monotonic `elapsed_seconds`, `root_bytes`
+(integer or null), `direct_bytes` (integer or null),
+`directories:[{id,name,bytes,navigable,detail}]`, and
+`omitted_directories:{count,bytes}`. Only navigable rows have an ID; all
+breadcrumbs/row IDs belong to this job. Display names safely escape control or
+invalid UTF-8 bytes; never send a displayed name back as a path.
+`coverage` is `complete`, `lower_bound` or `unknown`. Diagnostics include
+`warning_count` (diagnostic lines, not a precise unreadable-path count),
+`warning_sample`, `warning_truncated`, `permission_denied`, stdout/stderr byte
+counts, `exit_code` (null before a native exit), `error`, `error_code`,
+`stop_reason` and `display_truncated`.
+
+States are `starting`, `running`, `cancelling`, `complete`, `partial`, `failed`,
+`cancelled`, `timed_out` and nonterminal `finalization_failed`. Terminal results
+are dated only after the owned child is reaped.409 rejects busy/finalizing work,
+stale/replaced IDs or cancellation of a finalized job;400 rejects malformed
+payloads/unknown IDs. Missing tooling/shutdown/startup failure returns503;
+disabled controls or bad Origin/nonce returns403; bad auth401. Existing body,
+media-type and routing errors remain explicit. Read errors retain dated values;
+they do not authorize a new scan.
 
 ## Homelab fixed controls
 
@@ -472,7 +590,7 @@ override them. `--url` reads the same profile and prints the configured scheme,
 address and port, so phones do not receive a stale localhost link. If overriding
 the service port on its command line, use the same `--port` with `--url` and any
 tunnel. Discovery retains the default-loopback capability and adds `lan-https`.
-Version `0.7.0` retains `guarded-cleanup` / `cleanup-job-state` and appends literal
+Version `0.8.0` retains `guarded-cleanup` / `cleanup-job-state` and the literal
 `action-history`, `observed-action-state` and `workload-recovery` to the
 alphabetically sorted, append-only capability list and enabled
 `actions.capabilities`. Enabled metadata also advertises
@@ -480,6 +598,8 @@ alphabetically sorted, append-only capability list and enabled
 `service_actions:["restart","start","stop"]`. Older lists absent means legacy
 choices only and no history fetch; read-only/default capability strings,
 observer defaults and the existing LAN/TLS access policy are retained.
+`storage-scan` is added separately to top-level capability discovery and
+`storage_scan.capabilities`, not to the irreversible action engine.
 
 To rotate a token, stop the service, move its private token file to a private
 backup, rerun `--init`, and restart. Existing browser sessions will need the new

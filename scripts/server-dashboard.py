@@ -28,14 +28,15 @@ import time
 from urllib.parse import urlsplit
 
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 LIMIT = 2 * 1024 * 1024
 ASSETS = Path(__file__).resolve().parent.parent / "dashboard"
 CAPABILITIES = sorted(["action-history", "authenticated-http", "cached-snapshot", "cleanup-job-state", "container-inventory-all", "control-actions", "guarded-cleanup", "interactive-view", "lan-https", "loopback-only",
-                       "observed-action-state", "read-only", "snapshot-json", "systemd-services", "trusted-lan-readonly", "workload-recovery"])
+                       "observed-action-state", "read-only", "snapshot-json", "storage-scan", "systemd-services", "trusted-lan-readonly", "workload-recovery"])
 PRIVATE_NETWORKS = tuple(ipaddress.ip_network(value) for value in
                          ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"))
 _actions_module = None
+_storage_module = None
 
 
 def action_module():
@@ -51,6 +52,21 @@ def action_module():
         spec.loader.exec_module(module)
         _actions_module = module
     return _actions_module
+
+
+def storage_module():
+    global _storage_module
+    if _storage_module is None:
+        spec = importlib.util.spec_from_file_location(
+            "dashboard_storage", Path(__file__).resolve().with_name("dashboard_storage.py")
+        )
+        if spec is None or spec.loader is None:
+            raise ValueError("dashboard storage component is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        _storage_module = module
+    return _storage_module
 
 
 def utc():
@@ -574,7 +590,7 @@ class DashboardServer(ThreadingHTTPServer):
             self.slots.release()
 
 
-def handler_for(snapshot, token, controls=None):
+def handler_for(snapshot, token, controls=None, scanner=None):
     class Handler(BaseHTTPRequestHandler):
         server_version = "agent-toolkit-dashboard"
 
@@ -620,9 +636,15 @@ def handler_for(snapshot, token, controls=None):
             route = urlsplit(self.path)
             if route.query:
                 return self.respond(404, b'{"error":"not found"}')
-            if route.path in {"/api/snapshot", "/api/actions"}:
+            if route.path in {"/api/snapshot", "/api/actions", "/api/storage-scan"}:
                 if not self.authorized():
                     return self.respond(401, b'{"error":"access token required"}')
+                if route.path == "/api/storage-scan":
+                    if scanner is None:
+                        return self.respond(404, b'{"error":"storage scans are not supported"}')
+                    return self.respond(200, json.dumps(
+                        scanner.describe(), ensure_ascii=True, allow_nan=False,
+                    ).encode())
                 if route.path == "/api/actions":
                     if controls is None:
                         return self.respond(403, b'{"error":"homelab controls are disabled"}')
@@ -630,6 +652,10 @@ def handler_for(snapshot, token, controls=None):
                         controls.history(), ensure_ascii=True, allow_nan=False,
                     ).encode())
                 body = snapshot.read()
+                if body and scanner is not None:
+                    value = json.loads(body)
+                    value["storage_scan"] = scanner.metadata()  # Cheap metadata only; never starts work.
+                    body = json.dumps(value, ensure_ascii=True, allow_nan=False).encode()
                 return self.respond(200 if body else 503, body or b'{"status":"warming_up"}')
             assets = {
                 "/": ("index.html", "text/html; charset=utf-8"),
@@ -646,7 +672,7 @@ def handler_for(snapshot, token, controls=None):
 
         def do_POST(self):
             route = urlsplit(self.path)
-            if route.path != "/api/action" or route.query:
+            if route.path not in {"/api/action", "/api/storage-scan/start", "/api/storage-scan/cancel"} or route.query:
                 return self.respond(405, b'{"error":"unsupported action route"}')
             if not self.origin_allowed(required=True):
                 return self.respond(403, b'{"error":"same-origin action required"}')
@@ -678,6 +704,16 @@ def handler_for(snapshot, token, controls=None):
                 payload = json.loads(raw)
             except (ValueError, RecursionError):
                 return self.respond(400, b'{"error":"invalid JSON action"}')
+            if route.path != "/api/action":
+                if scanner is None:
+                    return self.respond(404, b'{"error":"storage scans are not supported"}')
+                try:
+                    result = scanner.start(payload) if route.path.endswith("/start") else scanner.cancel(payload)
+                except storage_module().StorageError as error:
+                    return self.respond(error.status, json.dumps(
+                        {"ok": False, "error": str(error)}, ensure_ascii=True, allow_nan=False,
+                    ).encode())
+                return self.respond(202, json.dumps(result, ensure_ascii=True, allow_nan=False).encode())
             try:
                 self.connection.settimeout(20)
                 result = controls.execute(payload)
@@ -710,6 +746,7 @@ def serve(settings, token, context):
         xdg("XDG_STATE_HOME", ".local/state") / "agent-toolkit",
         container_socket, container_inventory, lambda: collector.services(user=True), wake.set,
     ) if settings["actions"] else None
+    scanner = storage_module().StorageScanner(enabled=controls is not None)
 
     def sample():
         while not stop.is_set():
@@ -717,12 +754,14 @@ def serve(settings, token, context):
             value = collector.collect()
             value.update(interval_seconds=interval, stale_after_seconds=max(20, interval * 3))
             value["actions"] = controls.describe() if controls else {"enabled": False}
+            value["storage_scan"] = scanner.metadata()
             cache.publish(value)
             wake.wait(max(0.1, interval - (time.monotonic() - started)))
             wake.clear()
 
-    server = DashboardServer((settings["bind"], settings["port"]), handler_for(cache, token, controls),
+    server = DashboardServer((settings["bind"], settings["port"]), handler_for(cache, token, controls, scanner),
                              context, settings["allowed_networks"])
+    server.storage_scanner = scanner
     worker = threading.Thread(target=sample, name="dashboard-sampler", daemon=True)
     worker.start()
     scheme = "https" if context else "http"
@@ -735,7 +774,10 @@ def serve(settings, token, context):
         stop.set()
         wake.set()
         server.server_close()
+        storage_closed = scanner.close()
         worker.join(timeout=12)
+        if not storage_closed:
+            raise ValueError("owned storage scan could not be finalized; shutdown is incomplete")
 
 
 class Arguments(argparse.ArgumentParser):
@@ -768,6 +810,7 @@ def main():
         print(json.dumps({"initialized": True, "token_path": str(token_path())}))
     elif args.snapshot:
         value = Collector().collect()
+        value["storage_scan"] = storage_module().StorageScanner().metadata()
         print(json.dumps(value, ensure_ascii=True, allow_nan=False))
         return 4 if value["status"] == "degraded" else 0
     else:

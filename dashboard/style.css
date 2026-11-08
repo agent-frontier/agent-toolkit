@@ -77,6 +77,30 @@ code { color: #b7c9df; font-size: .78rem; }
 #notice { border: 1px solid #795b32; color: #f0ce99; background: #2b2319; padding: 14px 20px; margin: 0 0 20px; border-radius: 8px; font-size: .85rem; }
 .workload { padding: 12px 0; border-top: 1px solid var(--line); font-size: .8rem; }
 .workload p { overflow-wrap: anywhere; }
+#storage-scan { margin-bottom: 24px; }
+#storage-explorer .list-controls { margin: 0 0 8px; }
+.storage-readout { display: grid; gap: 4px; margin: 8px 0; }
+.storage-readout p { margin: 0; line-height: 1.35; }
+#storage-state { font-size: .85rem; font-weight: 650; }
+#storage-total { font-weight: 650; }
+#storage-visual-warning { border-left: 3px solid var(--amber); padding: 6px 10px; margin: 8px 0; line-height: 1.35; }
+#storage-scan[data-state="complete"] #storage-visual-warning { display: none; }
+#storage-unavailable { display: none; }
+#storage-explorer[hidden] + #storage-unavailable { display: block; }
+.storage-navigation, #storage-breadcrumbs { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.storage-navigation { margin: 8px 0; }
+#storage-breadcrumbs { flex: 1 1 200px; }
+#storage-breadcrumbs button { overflow-wrap: anywhere; white-space: normal; min-width: 44px; }
+#storage-map { width: 100%; height: auto; display: block; background: #0e1620; border: 1px solid var(--line); margin: 8px 0; }
+#storage-map rect { stroke: #0e1620; stroke-width: 2px; }
+#storage-map text { fill: #101c15; font-size: 20px; pointer-events: none; }
+#storage-directories { padding: 0; list-style-position: inside; }
+#storage-directories li { display: block; margin: 8px 0; }
+.storage-directory { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; width: 100%; min-height: 44px; text-align: left; color: var(--blue); background: #192536; border-color: #3a4b60; }
+.storage-directory > span { min-width: 0; overflow-wrap: anywhere; }
+.storage-directory .storage-size { white-space: nowrap; color: #d3e2f5; }
+#storage-error { border-left: 3px solid var(--amber); padding: 10px 12px; font-size: .8rem; }
+#storage-warnings { max-height: 180px; overflow-y: auto; white-space: pre-wrap; overflow-wrap: anywhere; font-size: .75rem; }
 footer { border-top: 1px solid var(--line); font-size: .7rem; padding-top: 20px; padding-bottom: 30px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
 [hidden] { display: none !important; }
