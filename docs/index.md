@@ -13,9 +13,10 @@
 
 Start with [Install](install.md), then [Cron troubleshooting](cron-troubleshooting.md), [Configuration](configuration.md), and [Usage](usage.md).
 
-For optional monitoring and guarded cleanup/workload controls, see the
+For optional monitoring, guarded cleanup/workload controls and an on-demand
+read-only directory map with drill-down, see the
 [Homelab dashboard](dashboard.md). It is observer-default and limited to
-localhost or explicit private-LAN HTTPS access.
+localhost or explicit private-LAN HTTPS access; scans use Linux/GNU `du`.
 
 ### Autonomous agents
 

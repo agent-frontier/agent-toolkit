@@ -26,7 +26,7 @@ The 30-second pitch ends here. Below the fold is for evaluators who want to go d
 | [`cert-watch.sh`](cert-watch.sh) | Read-only TLS certificate expiry monitor for local cert files and remote `host:port` endpoints, with per-cert status and audit-grade logging. | v0.2.0 |
 | [`log-shipper.sh`](log-shipper.sh) | exports the audit trail to Prometheus / NDJSON / OTLP for monitoring | v0.2.0 |
 | **Integration** — [`mcp-server/`](mcp-server/README.md) | stdio MCP server exposing `system-janitor` and `system-updater` to Claude Desktop, Cursor, Continue, Cline, and other MCP-aware runtimes. | in repo |
-| **Homelab dashboard** — [web UI](docs/dashboard.md) | Live disk/CPU/RAM, services, processes, Docker/Podman and Janitor activity. Optional guarded cleanup and Start/Restart/Stop/Kill/Remove controls; observer mode by default. Localhost or trusted-LAN HTTPS, Python stdlib only. | optional |
+| **Homelab dashboard** — [web UI](docs/dashboard.md) | Live disk/CPU/RAM, guarded cleanup and workload controls, plus an opt-in read-only [directory map and drill-down](docs/dashboard.md#on-demand-directory-usage-dirstat-style). Observer-default; localhost or trusted-LAN HTTPS. Python stdlib; Linux/GNU `du` for scans. | optional |
 
 Candidates under consideration live in
 [`docs/agents/toolkit-roadmap.md`](docs/agents/toolkit-roadmap.md) —

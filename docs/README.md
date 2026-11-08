@@ -38,7 +38,7 @@ on-disk shape is documented in
 | [cert-watch-install.md](./cert-watch-install.md) | Hourly certificate checks, target configuration and verification |
 | [log-shipper-install.md](./log-shipper-install.md) | Quarter-hour audit export, output configuration and verification |
 | [cron-troubleshooting.md](./cron-troubleshooting.md) | All four schedules, launcher status, startup failures and stale runs |
-| [dashboard.md](./dashboard.md) | Optional homelab web UI: observer-default monitoring, guarded cleanup and fixed current-user workload controls over localhost or private-LAN HTTPS |
+| [dashboard.md](./dashboard.md) | Optional homelab web UI: observer-default monitoring, guarded cleanup/workload controls and an on-demand read-only directory map/drill-down; Linux/GNU `du` for scans, localhost or private-LAN HTTPS |
 
 ## For autonomous agents
 

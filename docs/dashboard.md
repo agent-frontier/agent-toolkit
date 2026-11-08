@@ -236,6 +236,10 @@ a new, explicit read-only scan of that directory; **Back** and the breadcrumb
 buttons similarly rescan an ancestor. The small map tiles are decorative, not
 tiny navigation targets. Controls and ranked routes have at least44px targets.
 
+**Back is not instant cached history:** returning to Home or another ancestor
+starts a new recursive traversal with its own120-second budget and finalization
+grace. A large/changing tree may take that time or time out; no limit is bypassed.
+
 Scanning uses the existing opt-in controls/nonce and access policy. On the
 already-enabled LAN installation it requires no new login or setup.
 **Observer mode explicitly disables starting scans**; cached results can still
@@ -244,6 +248,24 @@ There is no deletion, cleanup-policy change, root elevation or file-content
 browser. GNU `du` reads directory entries and allocation metadata, **never file
 contents**. The service remains the same current-user NoNewPrivileges service;
 its existing128MiB/32-task limits, TLS, CIDRs and profile stay unchanged.
+
+**Existing-install activation:** scanning requires the upgraded running
+dashboard backend (0.8.0 or newer), advertised live `storage_scan` metadata,
+and a reloaded browser tab. Source `--version --json` alone does not prove the
+daemon has restarted. After updating the checkout, restart only
+`agent-toolkit-dashboard.service` and reload the page; keep the existing
+profile/authentication/TLS/CIDRs/permissions unchanged.
+
+**Native prerequisite:** GNU `du` from coreutils must be on the service's PATH
+on Linux. A read-only check is:
+
+```bash
+du --version
+```
+
+Expect GNU coreutils output, not a different `du` implementation. If Scan is
+unavailable, expand **Scan details / dates, coverage & diagnostics** for the
+tooling/access explanation. There is no fallback scan, elevation or silent zero.
 
 **What is measured:** allocated bytes on one filesystem, not apparent file
 length, `df` capacity/free space or reclaimable space. Sparse files can have large
@@ -338,8 +360,11 @@ States are `starting`, `running`, `cancelling`, `complete`, `partial`, `failed`,
 `cancelled`, `timed_out` and nonterminal `finalization_failed`. Terminal results
 are dated only after the owned child is reaped.409 rejects busy/finalizing work,
 stale/replaced IDs or cancellation of a finalized job;400 rejects malformed
-payloads/unknown IDs. Missing tooling/shutdown/startup failure returns503;
-disabled controls or bad Origin/nonce returns403; bad auth401. Existing body,
+payloads/unknown IDs. Missing tooling, shutdown or synchronous worker admission/
+startup rejection returns503. An accepted202 may later report
+`job.state="failed"` with `job.error_code="spawn_failed"` if native execution
+fails asynchronously; acceptance is not completion and never triggers replay.
+Disabled controls or bad Origin/nonce returns403; bad auth401. Existing body,
 media-type and routing errors remain explicit. Read errors retain dated values;
 they do not authorize a new scan.
 
